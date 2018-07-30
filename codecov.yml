@@ -1,0 +1,3 @@
+ignore:
+  - "expose/codegen/protobuf"  # ignore kubernets proto genererator
+  - "examples"  # ignore examples

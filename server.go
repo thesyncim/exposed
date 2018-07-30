@@ -1,0 +1,524 @@
+package exposed
+
+import (
+	"bufio"
+	"crypto/tls"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/thesyncim/exposed/encoding"
+	"github.com/thesyncim/exposed/encoding/proto"
+	"golang.org/x/net/trace"
+	"net/http"
+	"runtime"
+)
+
+var EnableTracing = false
+
+type ServerOption func(*serverOptions)
+
+// HandlerCtx is an interface implementing context passed to Server.Handler
+type HandlerCtx interface {
+	// ConcurrencyLimitError must set the response
+	// to 'concurrency limit exceeded' error.
+	//todo replace this by error value
+	ConcurrencyLimitError(concurrency int)
+
+	// init must prepare ctx for reading the next request.
+	init(conn net.Conn, logger *zerolog.Logger)
+
+	// ReadRequest must read request from br.
+	ReadRequest(br *bufio.Reader) error
+
+	// WriteResponse must write response to bw.
+	WriteResponse(bw *bufio.Writer) error
+}
+
+type serverOptions struct {
+	// CompressType is the compression type used for responses.
+	//
+	// CompressFlate is used by default.
+	CompressType CompressType
+
+	// Concurrency is the maximum number of concurrent goroutines
+	// with Server.Handler the server may run.
+	//
+	// DefaultConcurrency is used by default.
+	Concurrency int
+
+	// TLSConfig is TLS (aka SSL) config used for accepting encrypted
+	// client connections.
+	//
+	// Encrypted connections may be used for transferring sensitive
+	// information over untrusted networks.
+	//
+	// By default server accepts only unencrypted connections.
+	TLSConfig *tls.Config
+
+	// MaxBatchDelay is the maximum duration before ready responses
+	// are sent to the client.
+	//
+	// Responses' batching may reduce network bandwidth usage and CPU usage.
+	//
+	// By default responses are sent immediately to the client.
+	MaxBatchDelay time.Duration
+
+	// Maximum duration for reading the full request (including body).
+	//
+	// This also limits the maximum lifetime for idle connections.
+	//
+	// By default request read timeout is unlimited.
+	ReadTimeout time.Duration
+
+	// Maximum duration for writing the full response (including body).
+	//
+	// By default response write timeout is unlimited.
+	WriteTimeout time.Duration
+
+	// ReadBufferSize is the size for read buffer.
+	//
+	// DefaultReadBufferSize is used by default.
+	ReadBufferSize int
+
+	// WriteBufferSize is the size for write buffer.
+	//
+	// DefaultWriteBufferSize is used by default.
+	WriteBufferSize int
+
+	//Codec
+	Codec encoding.Codec
+}
+
+var defaultServerOptions = serverOptions{
+	Codec:           encoding.GetCodec(proto.CodecName),
+	TLSConfig:       nil,
+	CompressType:    CompressNone,
+	ReadBufferSize:  64 * 1024,
+	WriteBufferSize: 64 * 1024,
+	Concurrency:     100000,
+	ReadTimeout:     time.Second * 30,
+	WriteTimeout:    time.Second * 30,
+	MaxBatchDelay:   0,
+}
+
+// Server accepts rpc requests from Client.
+type Server struct {
+	opts serverOptions
+
+	// SniffHeader is the header read from each client connection.
+	//
+	// The server sends the same header to each client.
+	SniffHeader string
+
+	// ProtocolVersion is the version of HandlerCtx.ReadRequest
+	// and HandlerCtx.WriteResponse.
+	//
+	// The ProtocolVersion must be changed each time HandlerCtx.ReadRequest
+	// or HandlerCtx.WriteResponse changes the underlying format.
+	ProtocolVersion byte
+
+	// NewHandlerCtx must return new HandlerCtx
+	NewHandlerCtx func() HandlerCtx
+
+	// Handler must process incoming requests.
+	//
+	// The handler must return either ctx passed to the call
+	// or new non-nil ctx.
+	//
+	// The handler may return ctx passed to the call only if the ctx
+	// is no longer used after returning from the handler.
+	// Otherwise new ctx must be returned.
+	Handler func(ctx HandlerCtx) HandlerCtx
+
+	// Logger, which is used by the Server.
+	//
+	// Standard logger from log package is used by default.
+	Logger *zerolog.Logger
+
+	events     trace.EventLog
+	eventsLock sync.Mutex
+
+	workItemPool sync.Pool
+
+	concurrencyCount uint32
+}
+
+func NewServer(opts ...ServerOption) *Server {
+	s := &Server{
+		ProtocolVersion: byte(2),
+		SniffHeader:     "exposed",
+	}
+	s.opts = defaultServerOptions
+	for _, o := range opts {
+		o(&s.opts)
+	}
+	eHandler := newExposedCtx(s.opts.Codec)().(*exposedCtx).Handle
+	s.Handler = eHandler
+	s.NewHandlerCtx = newExposedCtx(s.opts.Codec)
+
+	if EnableTracing {
+		_, file, line, _ := runtime.Caller(1)
+		s.events = trace.NewEventLog("exposed.Server", fmt.Sprintf("%s:%d", file, line))
+		go http.ListenAndServe("127.0.0.1:8976", nil)
+	}
+
+	return s
+}
+
+func (s *Server) concurrency() int {
+	concurrency := s.opts.Concurrency
+	if concurrency <= 0 {
+		concurrency = DefaultConcurrency
+	}
+	return concurrency
+}
+
+// Serve serves rpc requests accepted from the given listener.
+func (s *Server) Serve(ln net.Listener) error {
+	if s.Handler == nil {
+		panic("BUG: Server.Handler must be set")
+	}
+	concurrency := s.concurrency()
+	//pipelineRequests := s.opts.PipelineRequests
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			if conn != nil {
+				panic("BUG: net.Listener returned non-nil conn and non-nil error")
+			}
+			if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
+				s.logger().Printf("fastrpc.Server: temporary error when accepting new connections: %s", netErr)
+				time.Sleep(time.Second)
+				continue
+			}
+			if err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection") {
+				s.logger().Printf("fastrpc.Server: permanent error when accepting new connections: %s", err)
+				return err
+			}
+			return nil
+		}
+		if conn == nil {
+			panic("BUG: net.Listener returned (nil, nil)")
+		}
+
+		if EnableTracing {
+			s.eventsLock.Lock()
+			s.events.Printf("new connection RemoteAddr %s", conn.RemoteAddr())
+			s.eventsLock.Unlock()
+		}
+
+		n := int(atomic.LoadUint32(&s.concurrencyCount))
+		if n > concurrency {
+
+			s.logger().Printf("fastrpc.Server: concurrency limit exceeded: %d", concurrency)
+			continue
+		}
+
+		go func() {
+			laddr := conn.LocalAddr().String()
+			raddr := conn.RemoteAddr().String()
+			if err := s.serveConn(conn); err != nil {
+				s.logger().Printf("fastrpc.Server: error on connection %q<->%q: %s", laddr, raddr, err)
+			}
+			/*	if pipelineRequests {
+					atomic.AddUint32(&s.concurrencyCount, ^uint32(0))
+				}
+			*/
+		}()
+	}
+}
+
+func (s *Server) serveConn(conn net.Conn) error {
+
+	cfg := &handshakeConfig{
+		sniffHeader:       []byte(s.SniffHeader),
+		protocolVersion:   s.ProtocolVersion,
+		conn:              conn,
+		readBufferSize:    s.opts.ReadBufferSize,
+		writeBufferSize:   s.opts.WriteBufferSize,
+		writeCompressType: s.opts.CompressType,
+		tlsConfig:         s.opts.TLSConfig,
+		isServer:          true,
+	}
+	br, bw, pipelineRequests, err := newBufioConn(cfg)
+	if err != nil {
+		conn.Close()
+		return err
+	}
+
+	stopCh := make(chan struct{})
+
+	pendingResponses := make(chan *serverWorkItem, s.concurrency())
+	readerDone := make(chan error, 1)
+	go func() {
+		readerDone <- s.connReader(br, pipelineRequests, conn, pendingResponses, stopCh)
+	}()
+
+	writerDone := make(chan error, 1)
+	go func() {
+		writerDone <- s.connWriter(bw, conn, pendingResponses, stopCh)
+	}()
+
+	select {
+	case err = <-readerDone:
+		conn.Close()
+		close(stopCh)
+		<-writerDone
+	case err = <-writerDone:
+		conn.Close()
+		close(stopCh)
+		<-readerDone
+	}
+	return err
+}
+
+func (s *Server) connReader(br *bufio.Reader, pipeline bool, conn net.Conn, pendingResponses chan<- *serverWorkItem, stopCh <-chan struct{}) error {
+	logger := s.logger()
+	concurrency := s.concurrency()
+	pipelineRequests := pipeline
+	readTimeout := s.opts.ReadTimeout
+	var lastReadDeadline time.Time
+	for {
+		wi := s.acquireWorkItem()
+
+		if readTimeout > 0 {
+			// Optimization: update read deadline only if more than 25%
+			// of the last read deadline exceeded.
+			// See https://github.com/golang/go/issues/15133 for details.
+			t := coarseTimeNow()
+			if t.Sub(lastReadDeadline) > (readTimeout >> 2) {
+				if err := conn.SetReadDeadline(t.Add(readTimeout)); err != nil {
+					// do not panic here, since the error may
+					// indicate that the connection is already closed
+					//wi.event.Errorf("cannot update read deadline: %s", err)
+					return fmt.Errorf("cannot update read deadline: %s", err)
+				}
+				lastReadDeadline = t
+			}
+		}
+
+		if n, err := io.ReadFull(br, wi.reqID[:]); err != nil {
+			if n == 0 {
+				// Ignore error if no bytes are read, since
+				// the client may just close the connection.
+				return nil
+			}
+			//wi.event.Errorf("cannot read request ID: %s", err)
+
+			return fmt.Errorf("cannot read request ID: %s", err)
+		}
+
+		wi.ctx.init(conn, logger)
+		if err := wi.ctx.ReadRequest(br); err != nil {
+			//	wi.event.Errorf("cannot read request: %s", err)
+			return fmt.Errorf("cannot read request: %s", err)
+		}
+
+		if pipelineRequests {
+			atomic.AddUint32(&s.concurrencyCount, 1)
+			s.handleRequest(wi, pendingResponses, stopCh)
+			atomic.AddUint32(&s.concurrencyCount, ^uint32(0))
+		} else {
+			n := int(atomic.AddUint32(&s.concurrencyCount, 1))
+			if n > concurrency {
+				atomic.AddUint32(&s.concurrencyCount, ^uint32(0))
+				wi.ctx.ConcurrencyLimitError(concurrency)
+				if !pushPendingResponse(pendingResponses, wi, stopCh) {
+					return nil
+				}
+				continue
+			}
+			go func(wi *serverWorkItem) {
+				s.handleRequest(wi, pendingResponses, stopCh)
+				atomic.AddUint32(&s.concurrencyCount, ^uint32(0))
+			}(wi)
+		}
+	}
+}
+
+func (s *Server) handleRequest(wi *serverWorkItem, pendingResponses chan<- *serverWorkItem, stopCh <-chan struct{}) {
+	reqID := wi.reqID
+	//wi.event.Printf("start handling request id %v", binary.BigEndian.Uint32(reqID[:]))
+
+	ctxNew := s.Handler(wi.ctx)
+	//wi.event.Printf("finish handling request id %v", binary.BigEndian.Uint32(reqID[:]))
+
+	if isZeroReqID(reqID) {
+		// Do not send response for SendNowait request.
+		if ctxNew == wi.ctx {
+			s.releaseWorkItem(wi)
+		}
+		return
+	}
+
+	//
+	if ctxNew != wi.ctx {
+		if ctxNew == nil {
+			panic("BUG: Server.Handler mustn't return nil")
+		}
+		// The current ctx may be still in use by the handler.
+		// So create new wi for passing to pendingResponses.
+		wi = s.acquireWorkItem()
+		wi.reqID = reqID
+		wi.ctx = ctxNew
+	}
+	pushPendingResponse(pendingResponses, wi, stopCh)
+}
+
+func (s *Server) RegisterService(e Exposable) {
+	registerService(e)
+}
+
+func (s *Server) RegisterHandleFunc(path string, handlerFunc HandlerFunc, info *OperationTypes) {
+	registerHandleFunc(path, handlerFunc, info)
+}
+
+func pushPendingResponse(pendingResponses chan<- *serverWorkItem, wi *serverWorkItem, stopCh <-chan struct{}) bool {
+	select {
+	case pendingResponses <- wi:
+	default:
+		select {
+		case pendingResponses <- wi:
+		case <-stopCh:
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) connWriter(bw *bufio.Writer, conn net.Conn, pendingResponses <-chan *serverWorkItem, stopCh <-chan struct{}) error {
+	var wi *serverWorkItem
+
+	var (
+		flushTimer    = getFlushTimer()
+		flushCh       <-chan time.Time
+		flushAlwaysCh = make(chan time.Time)
+	)
+	defer putFlushTimer(flushTimer)
+
+	close(flushAlwaysCh)
+	maxBatchDelay := s.opts.MaxBatchDelay
+	if maxBatchDelay < 0 {
+		maxBatchDelay = 0
+	}
+
+	writeTimeout := s.opts.WriteTimeout
+	var lastWriteDeadline time.Time
+	for {
+		select {
+		case wi = <-pendingResponses:
+		default:
+			select {
+			case wi = <-pendingResponses:
+			case <-stopCh:
+				return nil
+			case <-flushCh:
+				if err := bw.Flush(); err != nil {
+					return fmt.Errorf("cannot flush response data to client: %s", err)
+				}
+				flushCh = nil
+				continue
+			}
+		}
+
+		if writeTimeout > 0 {
+			// Optimization: update write deadline only if more than 25%
+			// of the last write deadline exceeded.
+			// See https://github.com/golang/go/issues/15133 for details.
+			t := coarseTimeNow()
+			if t.Sub(lastWriteDeadline) > (writeTimeout >> 2) {
+				if err := conn.SetWriteDeadline(t.Add(writeTimeout)); err != nil {
+					// do not panic here, since the error may
+					// indicate that the connection is already closed
+					return fmt.Errorf("cannot update write deadline: %s", err)
+				}
+				lastWriteDeadline = t
+			}
+		}
+
+		if _, err := bw.Write(wi.reqID[:]); err != nil {
+			return fmt.Errorf("cannot write response ID: %s", err)
+		}
+		if err := wi.ctx.WriteResponse(bw); err != nil {
+			return fmt.Errorf("cannot write response: %s", err)
+		}
+
+		s.releaseWorkItem(wi)
+
+		// re-arm flush channel
+		if flushCh == nil && len(pendingResponses) == 0 {
+			if maxBatchDelay > 0 {
+				resetFlushTimer(flushTimer, maxBatchDelay)
+				flushCh = flushTimer.C
+			} else {
+				flushCh = flushAlwaysCh
+			}
+		}
+	}
+}
+
+type serverWorkItem struct {
+	ctx   HandlerCtx
+	reqID [4]byte
+}
+
+func (s *Server) acquireWorkItem() *serverWorkItem {
+	v := s.workItemPool.Get()
+	if v == nil {
+		return &serverWorkItem{
+			ctx: s.NewHandlerCtx(),
+		}
+	}
+	return v.(*serverWorkItem)
+}
+
+func (s *Server) releaseWorkItem(wi *serverWorkItem) {
+	s.workItemPool.Put(wi)
+}
+
+var defaultLogger = zerolog.New(os.Stdout)
+
+func (s *Server) logger() *zerolog.Logger {
+	if s.Logger != nil {
+		return s.Logger
+	}
+	return &defaultLogger
+}
+
+func isZeroReqID(reqID [4]byte) bool {
+	return reqID[0] == 0 && reqID[1] == 0 && reqID[2] == 0 && reqID[3] == 0
+}
+
+// MaxBatchDelay is the maximum duration before ready responses
+// are sent to the client.
+//
+// Responses' batching may reduce network bandwidth usage and CPU usage.
+//
+// By default responses are sent immediately to the client.
+func ServerMaxBatchDelay(d time.Duration) ServerOption {
+	return func(options *serverOptions) {
+		options.MaxBatchDelay = d
+	}
+}
+
+//ServerCodec specifies the encoding codec to be used to marshal/unmarshal messages
+//its possible to achive zero copy with carefully writen codecs
+func ServerCodec(co string) ServerOption {
+	return func(c *serverOptions) {
+		c.Codec = encoding.GetCodec(co)
+	}
+}
+
+//ServerCompression sets the compression type used by the transport
+func ServerCompression(sc CompressType) ServerOption {
+	return func(c *serverOptions) {
+		c.CompressType = sc
+	}
+}
