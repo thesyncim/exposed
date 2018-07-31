@@ -73,7 +73,7 @@ func (h *exposedCtx) ConcurrencyLimitError(concurrency int) {
 	h.Response.SwapError([]byte("max concurrency excedded"))
 }
 
-func (h *exposedCtx) init(conn net.Conn, logger *zerolog.Logger) {
+func (h *exposedCtx) Init(conn net.Conn, logger *zerolog.Logger) {
 	h.Request.Reset()
 	h.Response.Reset()
 }

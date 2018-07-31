@@ -45,7 +45,7 @@ var defaultClientOptions = clientOptions{
 	WriteTimeout:          time.Second * 30,
 	ReadBufferSize:        64 * 1024,
 	WriteBufferSize:       64 * 1024,
-	MaxPendingRequests:    20000,
+	MaxPendingRequests:    80000,
 	PrioritizeNewRequests: true,
 }
 
