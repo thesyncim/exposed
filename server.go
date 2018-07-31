@@ -31,8 +31,8 @@ type HandlerCtx interface {
 	//todo replace this by error value
 	ConcurrencyLimitError(concurrency int)
 
-	// init must prepare ctx for reading the next request.
-	init(conn net.Conn, logger *zerolog.Logger)
+	// Init must prepare ctx for reading the next request.
+	Init(conn net.Conn, logger *zerolog.Logger)
 
 	// ReadRequest must read request from br.
 	ReadRequest(br *bufio.Reader) error
@@ -315,7 +315,7 @@ func (s *Server) connReader(br *bufio.Reader, pipeline bool, conn net.Conn, pend
 			return fmt.Errorf("cannot read request ID: %s", err)
 		}
 
-		wi.ctx.init(conn, logger)
+		wi.ctx.Init(conn, logger)
 		if err := wi.ctx.ReadRequest(br); err != nil {
 			//	wi.event.Errorf("cannot read request: %s", err)
 			return fmt.Errorf("cannot read request: %s", err)
