@@ -6,10 +6,13 @@ import (
 	"runtime"
 	"testing"
 
+	"bytes"
 	"github.com/pkg/profile"
 	"github.com/thesyncim/exposed"
+	"github.com/thesyncim/exposed/examples/echo"
 	"github.com/thesyncim/exposed/examples/echo/echoservice"
 	"github.com/thesyncim/exposed/examples/echo/ecodec"
+	"net"
 )
 
 var s *exposed.Server
@@ -17,7 +20,7 @@ var c *exposed.Client
 var cp *exposed.Client
 
 func init() {
-	/*log.SetFlags(log.Lshortfile)
+	log.SetFlags(log.Lshortfile)
 	ln, err := net.Listen("tcp", "127.0.0.1:5555")
 	if err != nil {
 		panic(err)
@@ -35,7 +38,7 @@ func init() {
 
 	go func() {
 		log.Print(s.Serve(ln))
-	}()*/
+	}()
 
 	c = exposed.NewClient("127.0.0.1:5555", exposed.ClientCodec(ecodec.CodecName), exposed.ClientCompression(exposed.CompressNone))
 	cp = exposed.NewClient("127.0.0.1:5555", exposed.ClientCodec(ecodec.CodecName), exposed.PipelineRequests(true), exposed.ClientCompression(exposed.CompressNone))
@@ -154,9 +157,12 @@ func benchmarkEcho(psize int64, concurrency int64, b *testing.B, c *echoservice.
 
 		//var result []byte
 		for pb.Next() {
-			_, err := c.Echo(payload)
+			resp, err := c.Echo(payload)
 			if err != nil {
 				b.Fatal(err)
+			}
+			if !bytes.Equal(resp, payload) {
+				panic("mismatch")
 			}
 		}
 	})
