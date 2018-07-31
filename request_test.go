@@ -10,7 +10,7 @@ import (
 func TestRequestMarshalUnmarshal(t *testing.T) {
 	var buf bytes.Buffer
 
-	req := AcquireRequest()
+	req := acquireRequest()
 	bw := bufio.NewWriter(&buf)
 	for i := 0; i < 10; i++ {
 		op := uint64(1)
@@ -24,9 +24,9 @@ func TestRequestMarshalUnmarshal(t *testing.T) {
 	if err := bw.Flush(); err != nil {
 		t.Fatalf("unexpected error when flushing request: %s", err)
 	}
-	ReleaseRequest(req)
+	releaseRequest(req)
 
-	req1 := AcquireRequest()
+	req1 := acquireRequest()
 	br := bufio.NewReader(&buf)
 	for i := 0; i < 10; i++ {
 		name := uint64(1)
@@ -41,5 +41,5 @@ func TestRequestMarshalUnmarshal(t *testing.T) {
 			t.Fatalf("unexpected request payload read: %q. Expecting %q", req1.Payload(), value)
 		}
 	}
-	ReleaseRequest(req1)
+	releaseRequest(req1)
 }

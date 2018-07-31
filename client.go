@@ -202,7 +202,7 @@ func NewClient(addr string, opts ...ClientOption) (c *Client) {
 // Returns true if the request is successfully scheduled for sending,
 // otherwise returns false.
 //
-// Response for the given request is ignored.
+// response for the given request is ignored.
 func (c *Client) SendNowait(req requestWriter, releaseReq func(req requestWriter)) bool {
 	c.once.Do(c.init)
 
@@ -264,11 +264,11 @@ func (c *Client) Call(Operation string, args, reply interface{}) (err error) {
 		return err
 	}
 
-	req := AcquireRequest()
+	req := acquireRequest()
 	resp := AcquireResponse()
 
-	defer func(request *Request, response *Response) {
-		ReleaseRequest(req)
+	defer func(request *request, response *response) {
+		releaseRequest(req)
 		ReleaseResponse(resp)
 
 	}(req, resp)

@@ -11,8 +11,8 @@ import (
 
 // exposedCtx implements HandlerCtx
 type exposedCtx struct {
-	Request  *Request
-	Response *Response
+	Request  *request
+	Response *response
 
 	codec encoding.Codec
 }
@@ -22,7 +22,7 @@ func newExposedCtx(codec encoding.Codec) func() HandlerCtx {
 		return &exposedCtx{
 			codec:    codec,
 			Response: AcquireResponse(),
-			Request:  AcquireRequest(),
+			Request:  acquireRequest(),
 		}
 	}
 }

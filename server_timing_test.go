@@ -208,8 +208,8 @@ func benchmarkEndToEnd(b *testing.B, parallelism int, batchDelay time.Duration, 
 	b.RunParallel(func(pb *testing.PB) {
 		n := atomic.AddUint32(&clientIdx, 1)
 		c := cc[int(n)%len(cc)]
-		var req Request
-		var resp Response
+		var req request
+		var resp response
 		req.SwapValue([]byte("foobar"))
 		for pb.Next() {
 			if err := c.DoDeadline(&req, &resp, deadline); err != nil {

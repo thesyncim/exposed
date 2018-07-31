@@ -24,8 +24,8 @@ func TestClientNoServer(t *testing.T) {
 	resultCh := make(chan error, iterations)
 	for i := 0; i < iterations; i++ {
 		go func() {
-			var req Request
-			var resp Response
+			var req request
+			var resp response
 			req.SwapValue([]byte("foobar"))
 			resultCh <- c.DoDeadline(&req, &resp, deadline)
 		}()
@@ -65,8 +65,8 @@ func TestClientTimeout(t *testing.T) {
 	resultCh := make(chan error, iterations)
 	for i := 0; i < iterations; i++ {
 		go func() {
-			var req Request
-			var resp Response
+			var req request
+			var resp response
 			req.SwapValue([]byte("foobar"))
 			resultCh <- c.DoDeadline(&req, &resp, deadline)
 		}()
@@ -120,7 +120,7 @@ func TestClientBrokenServerCheckRequest(t *testing.T) {
 			return fmt.Errorf("cannot read reqID from the client: %s", err)
 		}
 
-		var req Request
+		var req request
 		br := bufio.NewReader(conn)
 		if err = req.ReadRequest(br); err != nil {
 			return fmt.Errorf("cannot read request from the client: %s", err)
@@ -180,8 +180,8 @@ func testClientBrokenServer(t *testing.T, serverConnFunc func(net.Conn) error) {
 		serverStopCh <- serverConnFunc(realConn)
 	}()
 
-	var req Request
-	var resp Response
+	var req request
+	var resp response
 	req.SwapValue([]byte("foobar"))
 	err := c.DoDeadline(&req, &resp, time.Now().Add(50*time.Millisecond))
 	if err == nil {
@@ -201,5 +201,5 @@ func testClientBrokenServer(t *testing.T, serverConnFunc func(net.Conn) error) {
 }
 
 func newTestResponse() responseReader {
-	return &Response{}
+	return &response{}
 }

@@ -6,8 +6,8 @@ import (
 	"sync"
 )
 
-// Request is a TLV request.
-type Request struct {
+// request is a TLV request.
+type request struct {
 	payload   []byte
 	operation uint64
 	opBuf     [8]byte
@@ -15,41 +15,41 @@ type Request struct {
 }
 
 // Reset resets the given request.
-func (req *Request) Reset() {
+func (req *request) Reset() {
 	req.operation = 0
 	req.payload = req.payload[:0]
 }
 
 //SetOperation sets request operation.
-func (req *Request) SetOperation(op uint64) {
+func (req *request) SetOperation(op uint64) {
 	req.operation = op
 }
 
 // Operation returns request operation.
 //
-// The returned payload is valid until the next Request method call
-// or until ReleaseRequest is called.
-func (req *Request) Operation() uint64 {
+// The returned payload is valid until the next request method call
+// or until releaseRequest is called.
+func (req *request) Operation() uint64 {
 	return req.operation
 }
 
 // Write appends p to the request payload.
 //
 // It implements io.Writer.
-func (req *Request) Write(p []byte) (int, error) {
+func (req *request) Write(p []byte) (int, error) {
 	req.Append(p)
 	return len(p), nil
 }
 
 // AppendPayload appends p to the request payload.
-func (req *Request) Append(p []byte) {
+func (req *request) Append(p []byte) {
 	req.payload = append(req.payload, p...)
 }
 
 // SwapPayload swaps the given payload with the request's payload.
 //
 // It is forbidden accessing the swapped payload after the call.
-func (req *Request) SwapValue(value []byte) []byte {
+func (req *request) SwapValue(value []byte) []byte {
 	v := req.payload
 	req.payload = value
 	return v
@@ -57,16 +57,16 @@ func (req *Request) SwapValue(value []byte) []byte {
 
 // Payload returns request payload.
 //
-// The returned payload is valid until the next Request method call.
-// or until ReleaseRequest is called.
-func (req *Request) Payload() []byte {
+// The returned payload is valid until the next request method call.
+// or until releaseRequest is called.
+func (req *request) Payload() []byte {
 	return req.payload
 }
 
 // WriteRequest writes the request to bw.
 //
 // It implements fastrpc.RequestWriter
-func (req *Request) WriteRequest(bw *bufio.Writer) error {
+func (req *request) WriteRequest(bw *bufio.Writer) error {
 	if err := writeOperation(bw, req.operation, req.opBuf[:]); err != nil {
 		return fmt.Errorf("cannot write request operation: %s", err)
 	}
@@ -77,7 +77,7 @@ func (req *Request) WriteRequest(bw *bufio.Writer) error {
 }
 
 // readRequest reads the request from br.
-func (req *Request) ReadRequest(br *bufio.Reader) (err error) {
+func (req *request) ReadRequest(br *bufio.Reader) (err error) {
 
 	req.operation, err = readOperation(br, req.opBuf[:])
 	if err != nil {
@@ -90,17 +90,17 @@ func (req *Request) ReadRequest(br *bufio.Reader) (err error) {
 	return nil
 }
 
-// AcquireRequest acquires new request.
-func AcquireRequest() *Request {
+// acquireRequest acquires new request.
+func acquireRequest() *request {
 	v := requestPool.Get()
 	if v == nil {
-		v = &Request{}
+		v = &request{}
 	}
-	return v.(*Request)
+	return v.(*request)
 }
 
-// ReleaseRequest releases the given request.
-func ReleaseRequest(req *Request) {
+// releaseRequest releases the given request.
+func releaseRequest(req *request) {
 	req.Reset()
 	requestPool.Put(req)
 }

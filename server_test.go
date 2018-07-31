@@ -43,7 +43,7 @@ func TestServerBrokenClientSendRequestAndCloseConn(t *testing.T) {
 			return fmt.Errorf("cannot send reqID to the server: %s", err)
 		}
 
-		var req Request
+		var req request
 		req.Append([]byte("foobar"))
 		bw := bufio.NewWriter(conn)
 		if err := req.WriteRequest(bw); err != nil {
@@ -59,7 +59,7 @@ func TestServerBrokenClientSendRequestAndCloseConn(t *testing.T) {
 
 func newTestHandlerCtx() HandlerCtx {
 	return &exposedCtx{
-		Request:  AcquireRequest(),
+		Request:  acquireRequest(),
 		Response: AcquireResponse(),
 	}
 }
@@ -125,12 +125,13 @@ func TestServerWithoutTLS(t *testing.T) {
 	s.Handler = testEchoHandler
 
 	serverStop, c := newTestServerClientExt(s)
-	c.opts.TLSConfig = &tls.Config{
+	ctlopt := ClientTLSConfig(&tls.Config{
 		InsecureSkipVerify: true,
-	}
+	})
+	ctlopt(&c.opts)
 
-	var req Request
-	var resp Response
+	var req request
+	var resp response
 
 	for i := 0; i < 10; i++ {
 		req.SwapValue([]byte("foobar"))
@@ -460,8 +461,8 @@ func TestServerConcurrencyLimit(t *testing.T) {
 	resultCh := make(chan error, concurrency)
 	for i := 0; i < concurrency; i++ {
 		go func() {
-			var req Request
-			var resp Response
+			var req request
+			var resp response
 			req.SetOperation(4)
 			if err := c.DoDeadline(&req, &resp, time.Now().Add(time.Hour)); err != nil {
 				resultCh <- err
@@ -487,8 +488,8 @@ func TestServerConcurrencyLimit(t *testing.T) {
 	// now all the requests must fail with 'concurrency limit exceeded'
 	// error.
 	for i := 0; i < 100; i++ {
-		var req Request
-		var resp Response
+		var req request
+		var resp response
 		req.Append([]byte("aaa.bbb"))
 		if err := c.DoDeadline(&req, &resp, time.Now().Add(time.Second)); err != nil {
 			t.Fatalf("unexpected error on iteration %d: %s", i, err)
@@ -532,7 +533,7 @@ func TestServerClientSendNowait(t *testing.T) {
 	serverStop, c := newTestServerClient(h)
 
 	err := testServerClientConcurrentExt(func() error {
-		var resp Response
+		var resp response
 		for i := 0; i < iterations; i++ {
 			if i%2 == 0 {
 				req := acquireTestRequest()
@@ -541,7 +542,7 @@ func TestServerClientSendNowait(t *testing.T) {
 					return fmt.Errorf("cannot enqueue new request to SendNowait")
 				}
 			} else {
-				var req Request
+				var req request
 				s := fmt.Sprintf("foobar %d", i)
 				req.SwapValue([]byte(s))
 				err := c.DoDeadline(&req, &resp, time.Now().Add(time.Second))
@@ -686,8 +687,8 @@ func testGetBatchDelay(c *Client) error {
 }
 
 func testGetExt(c *Client, iterations int) error {
-	var req Request
-	var resp Response
+	var req request
+	var resp response
 	for i := 0; i < iterations; i++ {
 		s := fmt.Sprintf("foobar %d", i)
 		req.SwapValue([]byte(s))
@@ -704,8 +705,8 @@ func testGetExt(c *Client, iterations int) error {
 
 func testSleep(c *Client) error {
 	var (
-		req  Request
-		resp Response
+		req  request
+		resp response
 	)
 	expectedBodyPrefix := []byte("slept for ")
 	for i := 0; i < 10; i++ {
@@ -723,8 +724,8 @@ func testSleep(c *Client) error {
 
 func testTimeout(c *Client) error {
 	var (
-		req  Request
-		resp Response
+		req  request
+		resp response
 	)
 	for i := 0; i < 10; i++ {
 		req.SwapValue([]byte("fobar"))
@@ -741,8 +742,8 @@ func testTimeout(c *Client) error {
 
 func testNewCtx(c *Client) error {
 	var (
-		req  Request
-		resp Response
+		req  request
+		resp response
 	)
 	for i := 0; i < 10; i++ {
 		req.SwapValue([]byte("fobar"))
@@ -842,10 +843,10 @@ func newTestServerTLSConfig() *tls.Config {
 	return tlsConfig
 }
 
-func acquireTestRequest() *Request {
-	return AcquireRequest()
+func acquireTestRequest() *request {
+	return acquireRequest()
 }
 
 func releaseTestRequest(req requestWriter) {
-	ReleaseRequest(req.(*Request))
+	releaseRequest(req.(*request))
 }
