@@ -164,7 +164,7 @@ func benchmarkEndToEnd(b *testing.B, parallelism int, batchDelay time.Duration, 
 		serverBatchDelay = 100 * time.Microsecond
 	}
 
-	var expectedBody = make([]byte, 512)
+	var expectedBody = make([]byte, 8)
 	rand.Read(expectedBody)
 	s := NewServer(
 		ServerMaxConcurrency(uint32(parallelism*runtime.NumCPU())),

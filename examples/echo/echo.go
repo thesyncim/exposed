@@ -11,5 +11,5 @@ type Echo struct {
 }
 
 func (Echo) Echo(msg []byte) []byte {
-	return nil
+	return msg
 }
