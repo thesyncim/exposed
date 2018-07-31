@@ -13,10 +13,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"encoding/binary"
 	"github.com/cespare/xxhash"
 	"github.com/thesyncim/exposed/encoding"
 	"github.com/thesyncim/exposed/encoding/proto"
-	"github.com/thesyncim/exposed/internal/protocol"
 )
 
 // requestWriter is an interface for writing rpc request to buffered writer.
@@ -45,7 +45,7 @@ var defaultClientOptions = clientOptions{
 	WriteTimeout:          time.Second * 30,
 	ReadBufferSize:        64 * 1024,
 	WriteBufferSize:       64 * 1024,
-	MaxPendingRequests:    80000,
+	MaxPendingRequests:    100000,
 	PrioritizeNewRequests: true,
 }
 
@@ -176,7 +176,7 @@ func NewClient(addr string, opts ...ClientOption) (c *Client) {
 
 	c = &Client{
 		NewResponse: func() responseReader {
-			return protocol.AcquireResponse()
+			return AcquireResponse()
 		},
 		Addr:            addr,
 		ProtocolVersion: byte(2),
@@ -264,12 +264,12 @@ func (c *Client) Call(Operation string, args, reply interface{}) (err error) {
 		return err
 	}
 
-	req := protocol.AcquireRequest()
-	resp := protocol.AcquireResponse()
+	req := AcquireRequest()
+	resp := AcquireResponse()
 
-	defer func(request *protocol.Request, response *protocol.Response) {
-		protocol.ReleaseRequest(req)
-		protocol.ReleaseResponse(resp)
+	defer func(request *Request, response *Response) {
+		ReleaseRequest(req)
+		ReleaseResponse(resp)
 
 	}(req, resp)
 	req.SetOperation(xxhash.Sum64String(Operation))
@@ -358,11 +358,7 @@ func (c *Client) enqueueWorkItem(wi *clientWorkItem) error {
 }
 
 func (c *Client) maxPendingRequests() int {
-	maxPendingRequests := c.opts.MaxPendingRequests
-	if maxPendingRequests <= 0 {
-		maxPendingRequests = DefaultMaxPendingRequests
-	}
-	return maxPendingRequests
+	return c.opts.MaxPendingRequests
 }
 
 func (c *Client) init() {
@@ -605,8 +601,8 @@ func (c *Client) connWriter(bw *bufio.Writer, conn net.Conn, stopCh <-chan struc
 			}
 		}
 
-		b := appendUint32(buf[:0], reqID)
-		if _, err := bw.Write(b); err != nil {
+		binary.BigEndian.PutUint32(buf[:], reqID)
+		if _, err := bw.Write(buf[:]); err != nil {
 			err = fmt.Errorf("cannot send request ID to the server: %s", err)
 			c.doneError(wi, err)
 			return err
@@ -678,7 +674,7 @@ func (c *Client) connReader(br *bufio.Reader, conn net.Conn) error {
 			return fmt.Errorf("cannot read response ID: %s", err)
 		}
 
-		reqID := bytes2Uint32(buf)
+		reqID := binary.BigEndian.Uint32(buf[:])
 
 		c.pendingResponsesLock.Lock()
 		wi := c.pendingResponses[reqID]
@@ -774,14 +770,6 @@ func releaseClientWorkItem(wi *clientWorkItem) {
 }
 
 var clientWorkItemPool sync.Pool
-
-func appendUint32(b []byte, n uint32) []byte {
-	return append(b, byte(n), byte(n>>8), byte(n>>16), byte(n>>24))
-}
-
-func bytes2Uint32(b [4]byte) uint32 {
-	return (uint32(b[3]) << 24) | (uint32(b[2]) << 16) | (uint32(b[1]) << 8) | uint32(b[0])
-}
 
 //ClientCompression set the client compression type
 func ClientCompression(compression CompressType) ClientOption {

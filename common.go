@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"encoding/binary"
 	"github.com/golang/snappy"
 )
 
@@ -82,6 +83,7 @@ type handshakeConfig struct {
 	pipeline          bool
 }
 
+//todo move allow registered compress type
 func newBufioConn(cfg *handshakeConfig) (*bufio.Reader, *bufio.Writer, bool, error) {
 
 	readCompressType, pipeline, realConn, err := handshake(cfg)
@@ -100,9 +102,7 @@ func newBufioConn(cfg *handshakeConfig) (*bufio.Reader, *bufio.Writer, bool, err
 		return nil, nil, false, fmt.Errorf("unknown read CompressType: %v", readCompressType)
 	}
 	readBufferSize := cfg.readBufferSize
-	if readBufferSize <= 0 {
-		readBufferSize = DefaultReadBufferSize
-	}
+
 	br := bufio.NewReaderSize(r, readBufferSize)
 
 	w := io.Writer(realConn)
@@ -267,6 +267,63 @@ func (wf *writeFlusher) Write(p []byte) (int, error) {
 		return 0, err
 	}
 	return n, nil
+}
+
+const MaxBytesSize = 1024 * 1024
+
+func writeBytes(bw *bufio.Writer, b, sizeBuf []byte) error {
+	size := len(b)
+	if size > MaxBytesSize {
+		return fmt.Errorf("too big size=%d. Must not exceed %d", size, MaxBytesSize)
+	}
+	binary.BigEndian.PutUint32(sizeBuf[:], uint32(size))
+	_, err := bw.Write(sizeBuf)
+	if err != nil {
+		return fmt.Errorf("cannot write size: %s", err)
+	}
+	_, err = bw.Write(b)
+	if err != nil {
+		return fmt.Errorf("cannot write body with size %d: %s", size, err)
+	}
+	return nil
+}
+
+func writeOperation(bw *bufio.Writer, op uint64, opBuf []byte) error {
+	binary.BigEndian.PutUint64(opBuf, op)
+	_, err := bw.Write(opBuf)
+	if err != nil {
+		return fmt.Errorf("cannot write size: %s", err)
+	}
+	return nil
+}
+
+func readBytes(br *bufio.Reader, b, sizeBuf []byte) ([]byte, error) {
+	_, err := io.ReadFull(br, sizeBuf)
+	if err != nil {
+		return b, fmt.Errorf("cannot read size: %s", err)
+	}
+	size := int(binary.BigEndian.Uint32(sizeBuf))
+	if size > MaxBytesSize {
+		return b, fmt.Errorf("too big size=%d. Must not exceed %d", size, MaxBytesSize)
+	}
+	if cap(b) < size {
+		b = make([]byte, size)
+	}
+	b = b[:size]
+	_, err = io.ReadFull(br, b)
+	if err != nil {
+		return b, fmt.Errorf("cannot read body with size %d: %s", size, err)
+	}
+	return b, nil
+}
+
+func readOperation(br *bufio.Reader, opBuf []byte) (uint64, error) {
+	_, err := io.ReadFull(br, opBuf)
+	if err != nil {
+		return 0, fmt.Errorf("cannot read size: %s", err)
+	}
+
+	return binary.BigEndian.Uint64(opBuf), nil
 }
 
 func getFlushTimer() *time.Timer {

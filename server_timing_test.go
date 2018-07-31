@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thesyncim/exposed/internal/protocol"
 	"math/rand"
 )
 
@@ -171,7 +170,7 @@ func benchmarkEndToEnd(b *testing.B, parallelism int, batchDelay time.Duration, 
 	s := &Server{
 		NewHandlerCtx: newTestHandlerCtx,
 		Handler: func(ctxv HandlerCtx) HandlerCtx {
-			ctx := ctxv.(*protocol.RequestCtx)
+			ctx := ctxv.(*exposedCtx)
 			ctx.Response.SwapPayload(expectedBody)
 			return ctx
 		},
@@ -209,8 +208,8 @@ func benchmarkEndToEnd(b *testing.B, parallelism int, batchDelay time.Duration, 
 	b.RunParallel(func(pb *testing.PB) {
 		n := atomic.AddUint32(&clientIdx, 1)
 		c := cc[int(n)%len(cc)]
-		var req protocol.Request
-		var resp protocol.Response
+		var req Request
+		var resp Response
 		req.SwapValue([]byte("foobar"))
 		for pb.Next() {
 			if err := c.DoDeadline(&req, &resp, deadline); err != nil {

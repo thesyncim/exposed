@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
-	"github.com/thesyncim/exposed/internal/protocol"
 	"github.com/valyala/fasthttp/fasthttputil"
 )
 
@@ -44,7 +43,7 @@ func TestServerBrokenClientSendRequestAndCloseConn(t *testing.T) {
 			return fmt.Errorf("cannot send reqID to the server: %s", err)
 		}
 
-		var req protocol.Request
+		var req Request
 		req.Append([]byte("foobar"))
 		bw := bufio.NewWriter(conn)
 		if err := req.WriteRequest(bw); err != nil {
@@ -59,13 +58,10 @@ func TestServerBrokenClientSendRequestAndCloseConn(t *testing.T) {
 }
 
 func newTestHandlerCtx() HandlerCtx {
-	return &protocol.RequestCtx{
-		ConcurrencyLimitErrorHandler: concurrencyLimitErrorHandler,
+	return &exposedCtx{
+		Request:  AcquireRequest(),
+		Response: AcquireResponse(),
 	}
-}
-
-func concurrencyLimitErrorHandler(ctx *protocol.RequestCtx, concurrency int) {
-	ctx.Response.SwapError([]byte("too many requests"))
 }
 
 func testServerBrokenClient(t *testing.T, clientConnFunc func(net.Conn) error) {
@@ -123,18 +119,18 @@ func testServerBrokenClient(t *testing.T, clientConnFunc func(net.Conn) error) {
 
 func TestServerWithoutTLS(t *testing.T) {
 	l := zerolog.New(ioutil.Discard)
-	s := &Server{
-		NewHandlerCtx: newTestHandlerCtx,
-		Handler:       testEchoHandler,
-		Logger:        &l,
-	}
+	s := NewServer()
+	s.Logger = &l
+	s.NewHandlerCtx = newTestHandlerCtx
+	s.Handler = testEchoHandler
+
 	serverStop, c := newTestServerClientExt(s)
 	c.opts.TLSConfig = &tls.Config{
 		InsecureSkipVerify: true,
 	}
 
-	var req protocol.Request
-	var resp protocol.Response
+	var req Request
+	var resp Response
 
 	for i := 0; i < 10; i++ {
 		req.SwapValue([]byte("foobar"))
@@ -151,14 +147,13 @@ func TestServerWithoutTLS(t *testing.T) {
 
 func TestServerTLSUnencryptedConn(t *testing.T) {
 	tlsConfig := newTestServerTLSConfig()
-	s := &Server{
-		NewHandlerCtx: newTestHandlerCtx,
-		Handler:       testEchoHandler,
 
-		opts: serverOptions{
-			TLSConfig: tlsConfig,
-		},
-	}
+	s := NewServer(
+		ServerTlsConfig(tlsConfig),
+	)
+	s.Handler = testEchoHandler
+	s.NewHandlerCtx = newTestHandlerCtx
+
 	serverStop, c := newTestServerClientExt(s)
 
 	if err := testGet(c); err != nil {
@@ -172,13 +167,12 @@ func TestServerTLSUnencryptedConn(t *testing.T) {
 
 func TestServerTLSSerial(t *testing.T) {
 	tlsConfig := newTestServerTLSConfig()
-	s := &Server{
-		NewHandlerCtx: newTestHandlerCtx,
-		Handler:       testEchoHandler,
-		opts: serverOptions{
-			TLSConfig: tlsConfig,
-		},
-	}
+	s := NewServer(
+		ServerTlsConfig(tlsConfig),
+	)
+	s.NewHandlerCtx = newTestHandlerCtx
+	s.Handler = testEchoHandler
+
 	serverStop, c := newTestServerClientExt(s)
 	c.opts.TLSConfig = &tls.Config{
 		InsecureSkipVerify: true,
@@ -195,13 +189,13 @@ func TestServerTLSSerial(t *testing.T) {
 
 func TestServerTLSConcurrent(t *testing.T) {
 	tlsConfig := newTestServerTLSConfig()
-	s := &Server{
-		NewHandlerCtx: newTestHandlerCtx,
-		Handler:       testEchoHandler,
-		opts: serverOptions{
-			TLSConfig: tlsConfig,
-		},
-	}
+
+	s := NewServer(
+		ServerTlsConfig(tlsConfig),
+	)
+	s.NewHandlerCtx = newTestHandlerCtx
+	s.Handler = testEchoHandler
+
 	serverStop, c := newTestServerClientExt(s)
 	c.opts.TLSConfig = &tls.Config{
 		InsecureSkipVerify: true,
@@ -305,13 +299,12 @@ func TestServerBatchDelayRequestConcurrent(t *testing.T) {
 }
 
 func TestServerBatchDelayResponseSerial(t *testing.T) {
-	s := &Server{
-		NewHandlerCtx: newTestHandlerCtx,
-		Handler:       testEchoHandler,
-		opts: serverOptions{
-			MaxBatchDelay: 10 * time.Millisecond,
-		},
-	}
+	s := NewServer(
+		ServerMaxBatchDelay(10 * time.Millisecond),
+	)
+	s.NewHandlerCtx = newTestHandlerCtx
+	s.Handler = testEchoHandler
+
 	serverStop, c := newTestServerClientExt(s)
 
 	if err := testGetBatchDelay(c); err != nil {
@@ -324,13 +317,10 @@ func TestServerBatchDelayResponseSerial(t *testing.T) {
 }
 
 func TestServerBatchDelayResponseConcurrent(t *testing.T) {
-	s := &Server{
-		NewHandlerCtx: newTestHandlerCtx,
-		Handler:       testEchoHandler,
-		opts: serverOptions{
-			MaxBatchDelay: 10 * time.Millisecond,
-		},
-	}
+	s := NewServer(ServerMaxBatchDelay(10 * time.Millisecond))
+	s.NewHandlerCtx = newTestHandlerCtx
+	s.Handler = testEchoHandler
+
 	serverStop, c := newTestServerClientExt(s)
 
 	if err := testServerClientConcurrent(func() error { return testGetBatchDelay(c) }); err != nil {
@@ -343,12 +333,9 @@ func TestServerBatchDelayResponseConcurrent(t *testing.T) {
 }
 
 func TestServerBatchDelayRequestResponseSerial(t *testing.T) {
-	s := &Server{
-		NewHandlerCtx: newTestHandlerCtx,
-		Handler:       testEchoHandler,
-		opts: serverOptions{
-			MaxBatchDelay: 10 * time.Millisecond,
-		}}
+	s := NewServer(ServerMaxBatchDelay(10 * time.Millisecond))
+	s.NewHandlerCtx = newTestHandlerCtx
+	s.Handler = testEchoHandler
 	serverStop, c := newTestServerClientExt(s)
 	c.opts.MaxBatchDelay = 10 * time.Millisecond
 
@@ -362,12 +349,10 @@ func TestServerBatchDelayRequestResponseSerial(t *testing.T) {
 }
 
 func TestServerBatchDelayRequestResponseConcurrent(t *testing.T) {
-	s := &Server{
-		NewHandlerCtx: newTestHandlerCtx,
-		Handler:       testEchoHandler,
-		opts: serverOptions{
-			MaxBatchDelay: 10 * time.Millisecond,
-		}}
+	s := NewServer(ServerMaxBatchDelay(10 * time.Millisecond))
+	s.Handler = testEchoHandler
+	s.NewHandlerCtx = newTestHandlerCtx
+
 	serverStop, c := newTestServerClientExt(s)
 	c.opts.MaxBatchDelay = 10 * time.Millisecond
 
@@ -419,13 +404,10 @@ func TestServerCompressMixedConcurrent(t *testing.T) {
 }
 
 func testServerCompressSerial(t *testing.T, reqCompressType, respCompressType CompressType) {
-	s := &Server{
-		NewHandlerCtx: newTestHandlerCtx,
-		Handler:       testEchoHandler,
-		opts: serverOptions{
-			CompressType: respCompressType,
-		},
-	}
+	s := NewServer(ServerCompression(respCompressType))
+	s.Handler = testEchoHandler
+	s.NewHandlerCtx = newTestHandlerCtx
+
 	serverStop, c := newTestServerClientExt(s)
 	c.opts.CompressType = reqCompressType
 
@@ -439,12 +421,10 @@ func testServerCompressSerial(t *testing.T, reqCompressType, respCompressType Co
 }
 
 func testServerCompressConcurrent(t *testing.T, reqCompressType, respCompressType CompressType) {
-	s := &Server{
-		NewHandlerCtx: newTestHandlerCtx,
-		Handler:       testEchoHandler,
-		opts: serverOptions{
-			CompressType: respCompressType,
-		}}
+	s := NewServer(ServerCompression(respCompressType))
+	s.Handler = testEchoHandler
+	s.NewHandlerCtx = newTestHandlerCtx
+
 	serverStop, c := newTestServerClientExt(s)
 	c.opts.CompressType = reqCompressType
 
@@ -461,27 +441,27 @@ func TestServerConcurrencyLimit(t *testing.T) {
 	const concurrency = 10
 	doneCh := make(chan struct{})
 	concurrencyCh := make(chan struct{}, concurrency)
-	s := &Server{
-		NewHandlerCtx: newTestHandlerCtx,
-		Handler: func(ctxv HandlerCtx) HandlerCtx {
-			concurrencyCh <- struct{}{}
-			<-doneCh
-			ctx := ctxv.(*protocol.RequestCtx)
-			ctx.Write([]byte("done"))
-			return ctx
-		},
-		opts: serverOptions{
-			Concurrency: concurrency,
-		},
+
+	s := NewServer()
+	s.NewHandlerCtx = newTestHandlerCtx
+	s.Handler = func(ctxv HandlerCtx) HandlerCtx {
+		concurrencyCh <- struct{}{}
+		<-doneCh
+		ctx := ctxv.(*exposedCtx)
+		ctx.Response.Write([]byte("done"))
+		return ctx
 	}
+
+	s.opts.Concurrency = concurrency
+
 	serverStop, c := newTestServerClientExt(s)
 
 	// issue concurrency requests to the server.
 	resultCh := make(chan error, concurrency)
 	for i := 0; i < concurrency; i++ {
 		go func() {
-			var req protocol.Request
-			var resp protocol.Response
+			var req Request
+			var resp Response
 			req.SetOperation(4)
 			if err := c.DoDeadline(&req, &resp, time.Now().Add(time.Hour)); err != nil {
 				resultCh <- err
@@ -507,13 +487,13 @@ func TestServerConcurrencyLimit(t *testing.T) {
 	// now all the requests must fail with 'concurrency limit exceeded'
 	// error.
 	for i := 0; i < 100; i++ {
-		var req protocol.Request
-		var resp protocol.Response
+		var req Request
+		var resp Response
 		req.Append([]byte("aaa.bbb"))
 		if err := c.DoDeadline(&req, &resp, time.Now().Add(time.Second)); err != nil {
 			t.Fatalf("unexpected error on iteration %d: %s", i, err)
 		}
-		if string(resp.Error()) != "too many requests" {
+		if string(resp.Error()) != "max concurrency excedded" {
 			t.Fatalf("unexpected response on iteration %d: %q. Expecting %q", i, resp.Error(), "too many requests")
 		}
 	}
@@ -541,10 +521,10 @@ func TestServerClientSendNowait(t *testing.T) {
 	const concurrency = 10
 	callsCh := make(chan struct{}, concurrency*iterations)
 	h := func(ctxv HandlerCtx) HandlerCtx {
-		ctx := ctxv.(*protocol.RequestCtx)
+		ctx := ctxv.(*exposedCtx)
 		s := string(ctx.Request.Payload())
 		if strings.HasPrefix(s, "foobar ") {
-			ctx.Write([]byte(s))
+			ctx.Response.Write([]byte(s))
 		}
 		callsCh <- struct{}{}
 		return ctx
@@ -552,7 +532,7 @@ func TestServerClientSendNowait(t *testing.T) {
 	serverStop, c := newTestServerClient(h)
 
 	err := testServerClientConcurrentExt(func() error {
-		var resp protocol.Response
+		var resp Response
 		for i := 0; i < iterations; i++ {
 			if i%2 == 0 {
 				req := acquireTestRequest()
@@ -561,7 +541,7 @@ func TestServerClientSendNowait(t *testing.T) {
 					return fmt.Errorf("cannot enqueue new request to SendNowait")
 				}
 			} else {
-				var req protocol.Request
+				var req Request
 				s := fmt.Sprintf("foobar %d", i)
 				req.SwapValue([]byte(s))
 				err := c.DoDeadline(&req, &resp, time.Now().Add(time.Second))
@@ -706,8 +686,8 @@ func testGetBatchDelay(c *Client) error {
 }
 
 func testGetExt(c *Client, iterations int) error {
-	var req protocol.Request
-	var resp protocol.Response
+	var req Request
+	var resp Response
 	for i := 0; i < iterations; i++ {
 		s := fmt.Sprintf("foobar %d", i)
 		req.SwapValue([]byte(s))
@@ -724,8 +704,8 @@ func testGetExt(c *Client, iterations int) error {
 
 func testSleep(c *Client) error {
 	var (
-		req  protocol.Request
-		resp protocol.Response
+		req  Request
+		resp Response
 	)
 	expectedBodyPrefix := []byte("slept for ")
 	for i := 0; i < 10; i++ {
@@ -743,8 +723,8 @@ func testSleep(c *Client) error {
 
 func testTimeout(c *Client) error {
 	var (
-		req  protocol.Request
-		resp protocol.Response
+		req  Request
+		resp Response
 	)
 	for i := 0; i < 10; i++ {
 		req.SwapValue([]byte("fobar"))
@@ -761,8 +741,8 @@ func testTimeout(c *Client) error {
 
 func testNewCtx(c *Client) error {
 	var (
-		req  protocol.Request
-		resp protocol.Response
+		req  Request
+		resp Response
 	)
 	for i := 0; i < 10; i++ {
 		req.SwapValue([]byte("fobar"))
@@ -790,10 +770,10 @@ func newTestServerClientExt(s *Server) (func() error, *Client) {
 }
 
 func newTestServer(handler func(HandlerCtx) HandlerCtx) (func() error, *fasthttputil.InmemoryListener) {
-	s := &Server{
-		NewHandlerCtx: newTestHandlerCtx,
-		Handler:       handler,
-	}
+	s := NewServer()
+	s.NewHandlerCtx = newTestHandlerCtx
+	s.Handler = handler
+
 	return newTestServerExt(s)
 }
 
@@ -819,26 +799,24 @@ func newTestServerExt(s *Server) (func() error, *fasthttputil.InmemoryListener) 
 }
 
 func newTestClient(ln *fasthttputil.InmemoryListener) *Client {
-	return &Client{
-		NewResponse: newTestResponse,
-		opts: clientOptions{
-			Dial: func(addr string) (net.Conn, error) {
-				return ln.Dial()
-			},
-		},
-	}
+
+	c := NewClient("", ClientDialer(func(addr string) (net.Conn, error) {
+		return ln.Dial()
+	}))
+	c.NewResponse = newTestResponse
+	return c
 }
 
 func testNewCtxHandler(ctxv HandlerCtx) HandlerCtx {
 	ctxvNew := newTestHandlerCtx()
-	ctx := ctxvNew.(*protocol.RequestCtx)
-	ctx.Write([]byte("new ctx!"))
+	ctx := ctxvNew.(*exposedCtx)
+	ctx.Response.Write([]byte("new ctx!"))
 	return ctx
 }
 
 func testEchoHandler(ctxv HandlerCtx) HandlerCtx {
-	ctx := ctxv.(*protocol.RequestCtx)
-	ctx.Write(ctx.Request.Payload())
+	ctx := ctxv.(*exposedCtx)
+	ctx.Response.Write(ctx.Request.Payload())
 	return ctx
 }
 
@@ -846,8 +824,8 @@ func testSleepHandler(ctxv HandlerCtx) HandlerCtx {
 	sleepDuration := time.Duration(rand.Intn(30)) * time.Millisecond
 	time.Sleep(sleepDuration)
 	s := fmt.Sprintf("slept for %s", sleepDuration)
-	ctx := ctxv.(*protocol.RequestCtx)
-	ctx.Write([]byte(s))
+	ctx := ctxv.(*exposedCtx)
+	ctx.Response.Write([]byte(s))
 	return ctx
 }
 
@@ -864,10 +842,10 @@ func newTestServerTLSConfig() *tls.Config {
 	return tlsConfig
 }
 
-func acquireTestRequest() *protocol.Request {
-	return protocol.AcquireRequest()
+func acquireTestRequest() *Request {
+	return AcquireRequest()
 }
 
 func releaseTestRequest(req requestWriter) {
-	protocol.ReleaseRequest(req.(*protocol.Request))
+	ReleaseRequest(req.(*Request))
 }

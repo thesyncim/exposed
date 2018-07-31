@@ -1,4 +1,4 @@
-package protocol
+package exposed
 
 import (
 	"bufio"

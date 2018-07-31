@@ -173,11 +173,8 @@ func NewServer(opts ...ServerOption) *Server {
 }
 
 func (s *Server) concurrency() int {
-	concurrency := s.opts.Concurrency
-	if concurrency <= 0 {
-		concurrency = DefaultConcurrency
-	}
-	return concurrency
+
+	return s.opts.Concurrency
 }
 
 // Serve serves rpc requests accepted from the given listener.
@@ -520,5 +517,12 @@ func ServerCodec(co string) ServerOption {
 func ServerCompression(sc CompressType) ServerOption {
 	return func(c *serverOptions) {
 		c.CompressType = sc
+	}
+}
+
+//ServerCompression sets the compression type used by the transport
+func ServerTlsConfig(tlsc *tls.Config) ServerOption {
+	return func(c *serverOptions) {
+		c.TLSConfig = tlsc
 	}
 }

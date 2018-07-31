@@ -9,28 +9,23 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thesyncim/exposed/internal/protocol"
 	"github.com/valyala/fasthttp/fasthttputil"
 )
 
 func TestClientNoServer(t *testing.T) {
 
-	c := &Client{
-		NewResponse: newTestResponse,
-		opts: clientOptions{
-			Dial: func(addr string) (net.Conn, error) {
-				return nil, fmt.Errorf("no server")
-			},
-		},
-	}
+	c := NewClient("", ClientDialer(func(addr string) (net.Conn, error) {
+		return nil, fmt.Errorf("no server")
+	}))
+	c.NewResponse = newTestResponse
 
 	const iterations = 100
 	deadline := time.Now().Add(50 * time.Millisecond)
 	resultCh := make(chan error, iterations)
 	for i := 0; i < iterations; i++ {
 		go func() {
-			var req protocol.Request
-			var resp protocol.Response
+			var req Request
+			var resp Response
 			req.SwapValue([]byte("foobar"))
 			resultCh <- c.DoDeadline(&req, &resp, deadline)
 		}()
@@ -70,8 +65,8 @@ func TestClientTimeout(t *testing.T) {
 	resultCh := make(chan error, iterations)
 	for i := 0; i < iterations; i++ {
 		go func() {
-			var req protocol.Request
-			var resp protocol.Response
+			var req Request
+			var resp Response
 			req.SwapValue([]byte("foobar"))
 			resultCh <- c.DoDeadline(&req, &resp, deadline)
 		}()
@@ -125,7 +120,7 @@ func TestClientBrokenServerCheckRequest(t *testing.T) {
 			return fmt.Errorf("cannot read reqID from the client: %s", err)
 		}
 
-		var req protocol.Request
+		var req Request
 		br := bufio.NewReader(conn)
 		if err = req.ReadRequest(br); err != nil {
 			return fmt.Errorf("cannot read request from the client: %s", err)
@@ -185,8 +180,8 @@ func testClientBrokenServer(t *testing.T, serverConnFunc func(net.Conn) error) {
 		serverStopCh <- serverConnFunc(realConn)
 	}()
 
-	var req protocol.Request
-	var resp protocol.Response
+	var req Request
+	var resp Response
 	req.SwapValue([]byte("foobar"))
 	err := c.DoDeadline(&req, &resp, time.Now().Add(50*time.Millisecond))
 	if err == nil {
@@ -206,5 +201,5 @@ func testClientBrokenServer(t *testing.T, serverConnFunc func(net.Conn) error) {
 }
 
 func newTestResponse() responseReader {
-	return &protocol.Response{}
+	return &Response{}
 }

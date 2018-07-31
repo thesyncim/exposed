@@ -7,13 +7,12 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/thesyncim/exposed/encoding"
-	"github.com/thesyncim/exposed/internal/protocol"
 )
 
 // exposedCtx implements HandlerCtx
 type exposedCtx struct {
-	Request  *protocol.Request
-	Response *protocol.Response
+	Request  *Request
+	Response *Response
 
 	codec encoding.Codec
 }
@@ -22,8 +21,8 @@ func newExposedCtx(codec encoding.Codec) func() HandlerCtx {
 	return func() HandlerCtx {
 		return &exposedCtx{
 			codec:    codec,
-			Response: protocol.AcquireResponse(),
-			Request:  protocol.AcquireRequest(),
+			Response: AcquireResponse(),
+			Request:  AcquireRequest(),
 		}
 	}
 }
