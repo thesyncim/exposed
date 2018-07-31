@@ -51,7 +51,7 @@ type serverOptions struct {
 	// with Server.Handler the server may run.
 	//
 	// DefaultConcurrency is used by default.
-	Concurrency int
+	Concurrency uint32
 
 	// TLSConfig is TLS (aka SSL) config used for accepting encrypted
 	// client connections.
@@ -174,7 +174,7 @@ func NewServer(opts ...ServerOption) *Server {
 
 func (s *Server) concurrency() int {
 
-	return s.opts.Concurrency
+	return int(s.opts.Concurrency)
 }
 
 // Serve serves rpc requests accepted from the given listener.
@@ -524,5 +524,12 @@ func ServerCompression(sc CompressType) ServerOption {
 func ServerTlsConfig(tlsc *tls.Config) ServerOption {
 	return func(c *serverOptions) {
 		c.TLSConfig = tlsc
+	}
+}
+
+//ServerCompression sets the maximum number of concurrent requests before server return error
+func ServerMaxConcurrency(maxConcurrency uint32) ServerOption {
+	return func(c *serverOptions) {
+		c.Concurrency = maxConcurrency
 	}
 }

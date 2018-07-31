@@ -37,6 +37,7 @@ before_script:
 # .golangci.yml file at the top level of your repo.
 script:
   - go test -v -race ./...  -coverprofile=coverage.txt -covermode=atomic # Run all the tests with the race detector enabled
+  - go test -race -bench .
 
 
 after_success:

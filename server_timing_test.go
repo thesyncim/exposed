@@ -95,20 +95,19 @@ func BenchmarkSendNowait(b *testing.B) {
 	bN := uint64(b.N)
 	var n uint64
 	doneCh := make(chan struct{})
-	s := &Server{
-		NewHandlerCtx: newTestHandlerCtx,
-		Handler: func(ctxv HandlerCtx) HandlerCtx {
-			x := atomic.AddUint64(&n, 1)
-			if x == bN {
-				close(doneCh)
-			}
-			return ctxv
-		},
-		opts: serverOptions{
-			Concurrency:  runtime.GOMAXPROCS(-1) + 1,
-			CompressType: CompressNone,
-		},
+
+	s := NewServer(
+		ServerMaxConcurrency(uint32(runtime.GOMAXPROCS(-1) + 1)),
+	)
+	s.NewHandlerCtx = newTestHandlerCtx
+	s.Handler = func(ctxv HandlerCtx) HandlerCtx {
+		x := atomic.AddUint64(&n, 1)
+		if x == bN {
+			close(doneCh)
+		}
+		return ctxv
 	}
+
 	serverStop, ln := newTestServerExt(s)
 
 	value := []byte("foobar")
@@ -165,28 +164,27 @@ func benchmarkEndToEnd(b *testing.B, parallelism int, batchDelay time.Duration, 
 		serverBatchDelay = 100 * time.Microsecond
 	}
 
-	var expectedBody = make([]byte, 4096*1024)
+	var expectedBody = make([]byte, 512)
 	rand.Read(expectedBody)
-	s := &Server{
-		NewHandlerCtx: newTestHandlerCtx,
-		Handler: func(ctxv HandlerCtx) HandlerCtx {
-			ctx := ctxv.(*exposedCtx)
-			ctx.Response.SwapPayload(expectedBody)
-			return ctx
-		},
-		opts: serverOptions{
-			Concurrency:   parallelism * runtime.NumCPU(),
-			MaxBatchDelay: serverBatchDelay,
-			CompressType:  compressType,
-			TLSConfig:     tlsConfig,
-		},
+	s := NewServer(
+		ServerMaxConcurrency(uint32(parallelism*runtime.NumCPU())),
+		ServerMaxBatchDelay(serverBatchDelay),
+		ServerCompression(compressType),
+		ServerTlsConfig(tlsConfig),
+	)
+	s.NewHandlerCtx = newTestHandlerCtx
+	s.Handler = func(ctxv HandlerCtx) HandlerCtx {
+		ctx := ctxv.(*exposedCtx)
+		ctx.Response.SwapPayload(expectedBody)
+		return ctx
 	}
+
 	serverStop, ln := newTestServerExt(s)
 
 	var cc []*Client
 	for i := 0; i < runtime.NumCPU(); i++ {
 		c := newTestClient(ln)
-		c.opts.MaxPendingRequests = s.opts.Concurrency
+		c.opts.MaxPendingRequests = int(s.opts.Concurrency)
 		c.opts.MaxBatchDelay = batchDelay
 		c.opts.PipelineRequests = pipelineRequests
 
