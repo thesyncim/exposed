@@ -20,6 +20,14 @@ type Exposable interface {
 //Message represents an interchangeable payload
 type Message = interface{}
 
+type Handler interface {
+	ServeExposed(ctx *Context, req Message, resp Message) (err error)
+}
+
 // The HandlerFunc type is an adapter to allow the use of
 // ordinary functions as exposed RPC handlers.
 type HandlerFunc func(ctx *Context, req Message, resp Message) (err error)
+
+func (h HandlerFunc) ServeExposed(ctx *Context, req Message, resp Message) (err error) {
+	return h(ctx, req, resp)
+}

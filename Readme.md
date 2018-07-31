@@ -1,6 +1,8 @@
 Exposed - minimal high performant reflectionless RPC Server
 
-[![Build Status](https://travis-ci.org/thesyncim/exposed.svg?branch=master)](https://travis-ci.org/thesyncim/exposed) 
+[![Build Status](https://travis-ci.org/thesyncim/exposed.svg?branch=master)](https://travis-ci.org/thesyncim/exposed)
+[![codecov](https://codecov.io/gh/thesyncim/exposed/branch/master/graph/badge.svg)](https://codecov.io/gh/thesyncim/exposed)
+
 ## Getting Started
 
 ### Installing 
