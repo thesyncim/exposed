@@ -86,6 +86,15 @@ func main() {
         fmt.Println(resp)
 }
 ```
+**Benchmark**
+
+### One server and one client, on the same machine (Intel(R) Core(TM) i7-7700HQ CPU @ 2.80GHz) 8GB
+
+Framework|payload size (bytes)|number clients| concurrency|op/s|p50(ms)|p95(ms)|p99(ms)|Max(ms)|MB/s
+-------------|-------------|-------------|-------------|-------------|-------------|-------------|-------------|-------------|-------------
+
+
+
 
 ## Credits
  * [Aliaksandr Valialkin](https://github.com/valyala/fastrpc)
