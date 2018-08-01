@@ -24,23 +24,6 @@ var EnableTracing = false
 
 type ServerOption func(*serverOptions)
 
-// HandlerCtx is an interface implementing context passed to Server.Handler
-type HandlerCtx interface {
-	// ConcurrencyLimitError must set the response
-	// to 'concurrency limit exceeded' error.
-	//todo replace this by error value
-	ConcurrencyLimitError(concurrency int)
-
-	// Init must prepare ctx for reading the next request.
-	Init(conn net.Conn, logger *zerolog.Logger)
-
-	// ReadRequest must read request from br.
-	ReadRequest(br *bufio.Reader) error
-
-	// WriteResponse must write response to bw.
-	WriteResponse(bw *bufio.Writer) error
-}
-
 type serverOptions struct {
 	// CompressType is the compression type used for responses.
 	//
@@ -71,8 +54,7 @@ type serverOptions struct {
 	MaxBatchDelay time.Duration
 
 	// Maximum duration for reading the full request (including body).
-	//
-	// This also limits the maximum lifetime for idle connections.
+	////87	// This also limits the maximum lifetime for idle connections.
 	//
 	// By default request read timeout is unlimited.
 	ReadTimeout time.Duration
@@ -117,15 +99,15 @@ type Server struct {
 	// The server sends the same header to each client.
 	SniffHeader string
 
-	// ProtocolVersion is the version of HandlerCtx.ReadRequest
-	// and HandlerCtx.WriteResponse.
+	// ProtocolVersion is the version of *exposedCtx.ReadRequest
+	// and *exposedCtx.WriteResponse.
 	//
-	// The ProtocolVersion must be changed each time HandlerCtx.ReadRequest
-	// or HandlerCtx.WriteResponse changes the underlying format.
+	// The ProtocolVersion must be changed each time *exposedCtx.ReadRequest
+	// or *exposedCtx.WriteResponse changes the underlying format.
 	ProtocolVersion byte
 
-	// NewHandlerCtx must return new HandlerCtx
-	NewHandlerCtx func() HandlerCtx
+	// NewHandlerCtx must return new *exposedCtx
+	NewHandlerCtx func() *exposedCtx
 
 	// Handler must process incoming requests.
 	//
@@ -135,7 +117,7 @@ type Server struct {
 	// The handler may return ctx passed to the call only if the ctx
 	// is no longer used after returning from the handler.
 	// Otherwise new ctx must be returned.
-	Handler func(ctx HandlerCtx) HandlerCtx
+	Handler func(ctx *exposedCtx) *exposedCtx
 
 	// Logger, which is used by the Server.
 	//
@@ -159,7 +141,7 @@ func NewServer(opts ...ServerOption) *Server {
 	for _, o := range opts {
 		o(&s.opts)
 	}
-	eHandler := newExposedCtx(s.opts.Codec)().(*exposedCtx).Handle
+	eHandler := newExposedCtx(s.opts.Codec)().Handle
 	s.Handler = eHandler
 	s.NewHandlerCtx = newExposedCtx(s.opts.Codec)
 
@@ -462,7 +444,7 @@ func (s *Server) connWriter(bw *bufio.Writer, conn net.Conn, pendingResponses <-
 }
 
 type serverWorkItem struct {
-	ctx   HandlerCtx
+	ctx   *exposedCtx
 	reqID [4]byte
 }
 
@@ -480,7 +462,7 @@ func (s *Server) releaseWorkItem(wi *serverWorkItem) {
 	s.workItemPool.Put(wi)
 }
 
-var defaultLogger = zerolog.New(os.Stdout)
+var defaultLogger = zerolog.New(os.Stdout).With().Caller().Logger()
 
 func (s *Server) logger() *zerolog.Logger {
 	if s.Logger != nil {

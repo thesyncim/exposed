@@ -16,7 +16,7 @@ func TestRequestMarshalUnmarshal(t *testing.T) {
 		op := uint64(1)
 		value := fmt.Sprintf("payload %d", i)
 		req.SetOperation(op)
-		req.SwapValue([]byte(value))
+		req.SwapPayload([]byte(value))
 		if err := req.WriteRequest(bw); err != nil {
 			t.Fatalf("unexpected error when writing request: %s", err)
 		}

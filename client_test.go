@@ -26,7 +26,7 @@ func TestClientNoServer(t *testing.T) {
 		go func() {
 			var req request
 			var resp response
-			req.SwapValue([]byte("foobar"))
+			req.SwapPayload([]byte("foobar"))
 			resultCh <- c.DoDeadline(&req, &resp, deadline)
 		}()
 	}
@@ -67,7 +67,7 @@ func TestClientTimeout(t *testing.T) {
 		go func() {
 			var req request
 			var resp response
-			req.SwapValue([]byte("foobar"))
+			req.SwapPayload([]byte("foobar"))
 			resultCh <- c.DoDeadline(&req, &resp, deadline)
 		}()
 	}
@@ -182,7 +182,7 @@ func testClientBrokenServer(t *testing.T, serverConnFunc func(net.Conn) error) {
 
 	var req request
 	var resp response
-	req.SwapValue([]byte("foobar"))
+	req.SwapPayload([]byte("foobar"))
 	err := c.DoDeadline(&req, &resp, time.Now().Add(50*time.Millisecond))
 	if err == nil {
 		t.Fatalf("expecting error")

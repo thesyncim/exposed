@@ -49,10 +49,9 @@ func (req *request) Append(p []byte) {
 // SwapPayload swaps the given payload with the request's payload.
 //
 // It is forbidden accessing the swapped payload after the call.
-func (req *request) SwapValue(value []byte) []byte {
-	v := req.payload
+func (req *request) SwapPayload(value []byte) {
 	req.payload = value
-	return v
+	return
 }
 
 // Payload returns request payload.

@@ -35,10 +35,9 @@ func (resp *response) AppendPayload(p []byte) {
 // SwapPayload swaps the given payload with the response's payload.
 //
 // It is forbidden accessing the swapped payload after the call.
-func (resp *response) SwapPayload(value []byte) []byte {
-	v := resp.payload
+func (resp *response) SwapPayload(value []byte) {
 	resp.payload = value
-	return v
+	return
 }
 
 // SwapError swaps the given payload with the response's payload.
@@ -84,11 +83,11 @@ func (resp *response) ReadResponse(br *bufio.Reader) error {
 	var err error
 	resp.payload, err = readBytes(br, resp.payload[:0], resp.sizeBuf[:])
 	if err != nil {
-		return fmt.Errorf("cannot read request payload: %s", err)
+		return fmt.Errorf("cannot read response payload: %s", err)
 	}
 	resp.error, err = readBytes(br, resp.error[:0], resp.sizeBuf[:])
 	if err != nil {
-		return fmt.Errorf("cannot read request error: %s", err)
+		return fmt.Errorf("cannot read response error: %s", err)
 	}
 	return nil
 }

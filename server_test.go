@@ -57,7 +57,7 @@ func TestServerBrokenClientSendRequestAndCloseConn(t *testing.T) {
 	})
 }
 
-func newTestHandlerCtx() HandlerCtx {
+func newTestHandlerCtx() *exposedCtx {
 	return &exposedCtx{
 		Request:  acquireRequest(),
 		Response: AcquireResponse(),
@@ -134,7 +134,7 @@ func TestServerWithoutTLS(t *testing.T) {
 	var resp response
 
 	for i := 0; i < 10; i++ {
-		req.SwapValue([]byte("foobar"))
+		req.SwapPayload([]byte("foobar"))
 		err := c.DoDeadline(&req, &resp, time.Now().Add(time.Millisecond))
 		if err == nil {
 			t.Fatalf("expecting non-nil error")
@@ -237,7 +237,7 @@ func TestServerNewCtxConcurrent(t *testing.T) {
 
 func TestServerTimeoutSerial(t *testing.T) {
 	stopCh := make(chan struct{})
-	h := func(ctx HandlerCtx) HandlerCtx {
+	h := func(ctx *exposedCtx) *exposedCtx {
 		<-stopCh
 		return ctx
 	}
@@ -256,7 +256,7 @@ func TestServerTimeoutSerial(t *testing.T) {
 
 func TestServerTimeoutConcurrent(t *testing.T) {
 	stopCh := make(chan struct{})
-	h := func(ctx HandlerCtx) HandlerCtx {
+	h := func(ctx *exposedCtx) *exposedCtx {
 		<-stopCh
 		return ctx
 	}
@@ -445,10 +445,10 @@ func TestServerConcurrencyLimit(t *testing.T) {
 
 	s := NewServer()
 	s.NewHandlerCtx = newTestHandlerCtx
-	s.Handler = func(ctxv HandlerCtx) HandlerCtx {
+	s.Handler = func(ctxv *exposedCtx) *exposedCtx {
 		concurrencyCh <- struct{}{}
 		<-doneCh
-		ctx := ctxv.(*exposedCtx)
+		ctx := ctxv
 		ctx.Response.Write([]byte("done"))
 		return ctx
 	}
@@ -521,8 +521,8 @@ func TestServerClientSendNowait(t *testing.T) {
 	const iterations = 100
 	const concurrency = 10
 	callsCh := make(chan struct{}, concurrency*iterations)
-	h := func(ctxv HandlerCtx) HandlerCtx {
-		ctx := ctxv.(*exposedCtx)
+	h := func(ctxv *exposedCtx) *exposedCtx {
+		ctx := ctxv
 		s := string(ctx.Request.Payload())
 		if strings.HasPrefix(s, "foobar ") {
 			ctx.Response.Write([]byte(s))
@@ -537,14 +537,14 @@ func TestServerClientSendNowait(t *testing.T) {
 		for i := 0; i < iterations; i++ {
 			if i%2 == 0 {
 				req := acquireTestRequest()
-				req.SwapValue([]byte("nowait!!!"))
+				req.SwapPayload([]byte("nowait!!!"))
 				if !c.SendNowait(req, releaseTestRequest) {
 					return fmt.Errorf("cannot enqueue new request to SendNowait")
 				}
 			} else {
 				var req request
 				s := fmt.Sprintf("foobar %d", i)
-				req.SwapValue([]byte(s))
+				req.SwapPayload([]byte(s))
 				err := c.DoDeadline(&req, &resp, time.Now().Add(time.Second))
 				if err != nil {
 					return fmt.Errorf("unexpected error in DoDeadline on iteration %d: %s", i, err)
@@ -691,7 +691,7 @@ func testGetExt(c *Client, iterations int) error {
 	var resp response
 	for i := 0; i < iterations; i++ {
 		s := fmt.Sprintf("foobar %d", i)
-		req.SwapValue([]byte(s))
+		req.SwapPayload([]byte(s))
 		err := c.DoDeadline(&req, &resp, time.Now().Add(time.Second))
 		if err != nil {
 			return fmt.Errorf("unexpected error on iteration %d: %s", i, err)
@@ -710,7 +710,7 @@ func testSleep(c *Client) error {
 	)
 	expectedBodyPrefix := []byte("slept for ")
 	for i := 0; i < 10; i++ {
-		req.SwapValue([]byte("fobar"))
+		req.SwapPayload([]byte("fobar"))
 		err := c.DoDeadline(&req, &resp, time.Now().Add(time.Second))
 		if err != nil {
 			return fmt.Errorf("unexpected error on iteration %d: %s", i, err)
@@ -728,7 +728,7 @@ func testTimeout(c *Client) error {
 		resp response
 	)
 	for i := 0; i < 10; i++ {
-		req.SwapValue([]byte("fobar"))
+		req.SwapPayload([]byte("fobar"))
 		err := c.DoDeadline(&req, &resp, time.Now().Add(10*time.Millisecond))
 		if err == nil {
 			return fmt.Errorf("expecting non-nil error on iteration %d", i)
@@ -746,7 +746,7 @@ func testNewCtx(c *Client) error {
 		resp response
 	)
 	for i := 0; i < 10; i++ {
-		req.SwapValue([]byte("fobar"))
+		req.SwapPayload([]byte("fobar"))
 		err := c.DoDeadline(&req, &resp, time.Now().Add(100*time.Millisecond))
 		if err != nil {
 			return fmt.Errorf("unexpected error on iteration %d: %s", i, err)
@@ -758,7 +758,7 @@ func testNewCtx(c *Client) error {
 	return nil
 }
 
-func newTestServerClient(handler func(HandlerCtx) HandlerCtx) (func() error, *Client) {
+func newTestServerClient(handler func(*exposedCtx) *exposedCtx) (func() error, *Client) {
 	serverStop, ln := newTestServer(handler)
 	c := newTestClient(ln)
 	return serverStop, c
@@ -770,7 +770,7 @@ func newTestServerClientExt(s *Server) (func() error, *Client) {
 	return serverStop, c
 }
 
-func newTestServer(handler func(HandlerCtx) HandlerCtx) (func() error, *fasthttputil.InmemoryListener) {
+func newTestServer(handler func(*exposedCtx) *exposedCtx) (func() error, *fasthttputil.InmemoryListener) {
 	s := NewServer()
 	s.NewHandlerCtx = newTestHandlerCtx
 	s.Handler = handler
@@ -808,24 +808,24 @@ func newTestClient(ln *fasthttputil.InmemoryListener) *Client {
 	return c
 }
 
-func testNewCtxHandler(ctxv HandlerCtx) HandlerCtx {
+func testNewCtxHandler(ctxv *exposedCtx) *exposedCtx {
 	ctxvNew := newTestHandlerCtx()
-	ctx := ctxvNew.(*exposedCtx)
+	ctx := ctxvNew
 	ctx.Response.Write([]byte("new ctx!"))
 	return ctx
 }
 
-func testEchoHandler(ctxv HandlerCtx) HandlerCtx {
-	ctx := ctxv.(*exposedCtx)
+func testEchoHandler(ctxv *exposedCtx) *exposedCtx {
+	ctx := ctxv
 	ctx.Response.Write(ctx.Request.Payload())
 	return ctx
 }
 
-func testSleepHandler(ctxv HandlerCtx) HandlerCtx {
+func testSleepHandler(ctxv *exposedCtx) *exposedCtx {
 	sleepDuration := time.Duration(rand.Intn(30)) * time.Millisecond
 	time.Sleep(sleepDuration)
 	s := fmt.Sprintf("slept for %s", sleepDuration)
-	ctx := ctxv.(*exposedCtx)
+	ctx := ctxv
 	ctx.Response.Write([]byte(s))
 	return ctx
 }

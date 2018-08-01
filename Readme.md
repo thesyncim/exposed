@@ -14,7 +14,7 @@ go get github.com/thesyncim/exposed
 
 This will retrieve the library and install it.
 
-### Usage exposed is an high level RPC framework.
+### Usage
 
 example server:
 
@@ -26,7 +26,7 @@ import (
         "net"
 
         "github.com/thesyncim/exposed"
-        "github.com/thesyncim/exposed/codec/json"
+        "github.com/thesyncim/exposed/encoding/json"
 )
 
 func main() {
@@ -66,7 +66,7 @@ import (
         "fmt"
 
         "github.com/thesyncim/exposed"
-        "github.com/thesyncim/exposed/codec/json"
+        "github.com/thesyncim/exposed/encoding/json"
 )
 
 func main() {
@@ -87,3 +87,5 @@ func main() {
 }
 ```
 
+## Credits
+ * [Aliaksandr Valialkin](https://github.com/valyala/fastrpc)

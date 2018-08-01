@@ -18,7 +18,14 @@ func (ProtoCodec) Marshal(v interface{}) ([]byte, error) {
 }
 
 func (ProtoCodec) Unmarshal(data []byte, v interface{}) error {
-	return proto.Unmarshal(data, v.(proto.Message))
+	protoMsg := v.(proto.Message)
+
+	if pu, ok := protoMsg.(proto.Unmarshaler); ok {
+		// object can unmarshal itself, no need for buffer
+		return pu.Unmarshal(data)
+	}
+
+	panic("compile with gogoproto")
 }
 func (ProtoCodec) Name() string {
 	return CodecName

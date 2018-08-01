@@ -9,7 +9,7 @@ import (
 	"github.com/thesyncim/exposed/encoding"
 )
 
-// exposedCtx implements HandlerCtx
+// exposedCtx implements *exposedCtx
 type exposedCtx struct {
 	Request  *request
 	Response *response
@@ -17,8 +17,8 @@ type exposedCtx struct {
 	codec encoding.Codec
 }
 
-func newExposedCtx(codec encoding.Codec) func() HandlerCtx {
-	return func() HandlerCtx {
+func newExposedCtx(codec encoding.Codec) func() *exposedCtx {
+	return func() *exposedCtx {
 		return &exposedCtx{
 			codec:    codec,
 			Response: AcquireResponse(),
@@ -27,9 +27,9 @@ func newExposedCtx(codec encoding.Codec) func() HandlerCtx {
 	}
 }
 
-func (h *exposedCtx) Handle(ctxv HandlerCtx) (rctxv HandlerCtx) {
+func (h *exposedCtx) Handle(ctxv *exposedCtx) (rctxv *exposedCtx) {
 
-	eh := ctxv.(*exposedCtx)
+	eh := ctxv
 	defer func() {
 		if r := recover(); r != nil {
 			eh.Response.SwapError(append([]byte("panic captured: "), []byte(fmt.Sprint(r))...))

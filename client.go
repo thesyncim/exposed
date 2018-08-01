@@ -273,7 +273,7 @@ func (c *Client) Call(Operation string, args, reply interface{}) (err error) {
 
 	}(req, resp)
 	req.SetOperation(xxhash.Sum64String(Operation))
-	req.SwapValue(v)
+	req.SwapPayload(v)
 	/*	ctx, cancel := context.WithTimeout(context.Background(), time.Second*100)
 		defer cancel()*/
 	err = c.DoDeadline(req, resp, time.Now().Add(time.Second*120))

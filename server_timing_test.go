@@ -100,7 +100,7 @@ func BenchmarkSendNowait(b *testing.B) {
 		ServerMaxConcurrency(uint32(runtime.GOMAXPROCS(-1) + 1)),
 	)
 	s.NewHandlerCtx = newTestHandlerCtx
-	s.Handler = func(ctxv HandlerCtx) HandlerCtx {
+	s.Handler = func(ctxv *exposedCtx) *exposedCtx {
 		x := atomic.AddUint64(&n, 1)
 		if x == bN {
 			close(doneCh)
@@ -161,10 +161,10 @@ func benchmarkEndToEnd(b *testing.B, parallelism int, batchDelay time.Duration, 
 	}
 	var serverBatchDelay time.Duration
 	if batchDelay > 0 {
-		serverBatchDelay = 100 * time.Microsecond
+		serverBatchDelay = batchDelay
 	}
 
-	var expectedBody = make([]byte, 8)
+	var expectedBody = make([]byte, 128)
 	rand.Read(expectedBody)
 	s := NewServer(
 		ServerMaxConcurrency(uint32(parallelism*runtime.NumCPU())),
@@ -173,8 +173,8 @@ func benchmarkEndToEnd(b *testing.B, parallelism int, batchDelay time.Duration, 
 		ServerTlsConfig(tlsConfig),
 	)
 	s.NewHandlerCtx = newTestHandlerCtx
-	s.Handler = func(ctxv HandlerCtx) HandlerCtx {
-		ctx := ctxv.(*exposedCtx)
+	s.Handler = func(ctxv *exposedCtx) *exposedCtx {
+		ctx := ctxv
 		ctx.Response.SwapPayload(expectedBody)
 		return ctx
 	}
@@ -208,7 +208,7 @@ func benchmarkEndToEnd(b *testing.B, parallelism int, batchDelay time.Duration, 
 		c := cc[int(n)%len(cc)]
 		var req request
 		var resp response
-		req.SwapValue([]byte("foobar"))
+		req.SwapPayload([]byte("foobar"))
 		for pb.Next() {
 			if err := c.DoDeadline(&req, &resp, deadline); err != nil {
 				b.Fatalf("unexpected error: %s", err)

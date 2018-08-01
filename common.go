@@ -15,26 +15,6 @@ import (
 	"github.com/golang/snappy"
 )
 
-const (
-	// DefaultMaxPendingRequests is the default number of pending requests
-	// a single Client may queue before sending them to the server.
-	//
-	// This parameter may be overridden by Client.MaxPendingRequests.
-	DefaultMaxPendingRequests = 1000
-
-	// DefaultConcurrency is the default maximum number of concurrent
-	// Server.Handler goroutines the server may run.
-	DefaultConcurrency = 10000
-)
-
-const (
-	// DefaultReadBufferSize is the default size for read buffers.
-	DefaultReadBufferSize = 64 * 1024
-
-	// DefaultWriteBufferSize is the default size for write buffers.
-	DefaultWriteBufferSize = 64 * 1024
-)
-
 // CompressType is a compression type used for connections.
 type CompressType byte
 
@@ -124,9 +104,7 @@ func newBufioConn(cfg *handshakeConfig) (*bufio.Reader, *bufio.Writer, bool, err
 		return nil, nil, false, fmt.Errorf("unknown write CompressType: %v", cfg.writeCompressType)
 	}
 	writeBufferSize := cfg.writeBufferSize
-	if writeBufferSize <= 0 {
-		writeBufferSize = DefaultWriteBufferSize
-	}
+
 	bw := bufio.NewWriterSize(w, writeBufferSize)
 	return br, bw, pipeline, nil
 }
@@ -269,7 +247,7 @@ func (wf *writeFlusher) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-const MaxBytesSize = 1024 * 1024
+const MaxBytesSize = 16 << 20
 
 func writeBytes(bw *bufio.Writer, b, sizeBuf []byte) error {
 	size := len(b)
