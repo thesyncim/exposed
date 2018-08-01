@@ -88,7 +88,7 @@ func main() {
 ```
 **Benchmark**
 
-### One server and one client, on the same machine (Intel(R) Core(TM) i7-7700HQ CPU @ 2.80GHz) 8GB
+### server and client, on the same machine (Intel(R) Core(TM) i7-7700HQ CPU @ 2.80GHz | 8GB)
 
 Framework|payload size (bytes)|number clients| concurrency | op/s |MB/s| p50(ms)|p95(ms)|p99(ms)|Max(ms)|number GC|Total memory allocated
 -------------|-------------|-------------|-------------|-------------|-------------|-------------|-------------|-------------|-------------|-------------|-------------
