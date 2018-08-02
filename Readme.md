@@ -27,7 +27,7 @@ import (
         "net"
 
         "github.com/thesyncim/exposed"
-        "github.com/thesyncim/exposed/encoding/json"
+        "github.com/thesyncim/exposed/encoding/codec/json"
 )
 
 func main() {
@@ -67,7 +67,7 @@ import (
         "fmt"
 
         "github.com/thesyncim/exposed"
-        "github.com/thesyncim/exposed/encoding/json"
+        "github.com/thesyncim/exposed/encoding/codec/json"
 )
 
 func main() {
@@ -89,12 +89,6 @@ func main() {
 ```
 ### Generate service from interface definition
 
-```sh
-go get github.com/thesyncim/expose
-```
-
-this will download and install *expose* a codegen tool to generate an exposed service from your interface definition
-
 lets looks at the example
 
 ```go
@@ -112,6 +106,14 @@ func (Echo) Echo(msg []byte) []byte {
 }
 
 ```
+
+```sh
+go get github.com/thesyncim/expose
+```
+
+download and install *expose*.
+ A codegen tool to generate an exposed service from your interface definition
+
  ```sh 
  expose gen -i  Echoer -p github.com/thesyncim/exposed/examples/echo -s echoservice -o echoservice
  ```
