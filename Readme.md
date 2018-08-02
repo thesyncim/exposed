@@ -41,7 +41,7 @@ func main() {
                 //exposed.ServerCompression(exposed.CompressSnappy),
         )
 
-        server.RegisterHandleFunc("echo",
+        server.HandleFunc("echo",
                 func(ctx *exposed.Context, req exposed.Message, resp exposed.Message) (err error) {
                         resp.(*string) = req.(*string)
                         return nil

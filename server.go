@@ -16,12 +16,9 @@ import (
 	"github.com/thesyncim/exposed/encoding"
 	"github.com/thesyncim/exposed/encoding/codec/proto"
 	"golang.org/x/net/trace"
-	"net/http"
-	"runtime"
 )
 
-var EnableTracing = false
-
+// A ServerOption sets options such as codec, compress type, etc.
 type ServerOption func(*serverOptions)
 
 type serverOptions struct {
@@ -132,6 +129,8 @@ type Server struct {
 	concurrencyCount uint32
 }
 
+// NewServer creates a exposed server with the provided server options which has no service registered and has not
+// started to accept requests yet.
 func NewServer(opts ...ServerOption) *Server {
 	s := &Server{
 		ProtocolVersion: byte(2),
@@ -144,12 +143,6 @@ func NewServer(opts ...ServerOption) *Server {
 	eHandler := newExposedCtx(s.opts.Codec)().Handle
 	s.Handler = eHandler
 	s.NewHandlerCtx = newExposedCtx(s.opts.Codec)
-
-	if EnableTracing {
-		_, file, line, _ := runtime.Caller(1)
-		s.events = trace.NewEventLog("exposed.Server", fmt.Sprintf("%s:%d", file, line))
-		go http.ListenAndServe("127.0.0.1:8976", nil)
-	}
 
 	return s
 }
@@ -185,12 +178,6 @@ func (s *Server) Serve(ln net.Listener) error {
 		}
 		if conn == nil {
 			panic("BUG: net.Listener returned (nil, nil)")
-		}
-
-		if EnableTracing {
-			s.eventsLock.Lock()
-			s.events.Printf("new connection RemoteAddr %s", conn.RemoteAddr())
-			s.eventsLock.Unlock()
 		}
 
 		n := int(atomic.LoadUint32(&s.concurrencyCount))
@@ -355,7 +342,7 @@ func (s *Server) RegisterService(e Exposable) {
 	registerService(e)
 }
 
-func (s *Server) RegisterHandleFunc(path string, handlerFunc HandlerFunc, info *OperationTypes) {
+func (s *Server) HandleFunc(path string, handlerFunc HandlerFunc, info *OperationTypes) {
 	registerHandleFunc(path, handlerFunc, info)
 }
 
