@@ -1,5 +1,6 @@
 Exposed - minimal high performant reflectionless RPC Server
 
+[![GoDoc](http://img.shields.io/badge/go-documentation-brightgreen.svg?style=flat-square)](https://godoc.org/github.com/thesyncim/exposed)
 [![Build Status](https://travis-ci.org/thesyncim/exposed.svg?branch=master)](https://travis-ci.org/thesyncim/exposed)
 [![codecov](https://codecov.io/gh/thesyncim/exposed/branch/master/graph/badge.svg)](https://codecov.io/gh/thesyncim/exposed)
 
