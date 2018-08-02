@@ -2,6 +2,9 @@ package encoding
 
 import "io"
 
+// Codec defines the interface exposed uses to encode and decode messages.
+// Note that implementations of this interface must be thread safe;
+// a Codec's methods can be called from concurrent goroutines.
 type Codec interface {
 	Marshal(v interface{}) ([]byte, error)
 	Unmarshal(data []byte, v interface{}) error
@@ -10,10 +13,20 @@ type Codec interface {
 
 var registeredCodecs = map[string]Codec{}
 
+// RegisterCodec registers the provided Codec for use with all exposed clients and
+// servers.
+//
+// The Codec will be stored and looked up by result of its Name() method, which
+// should match the content-subtype of the encoding handled by the Codec.  This
+// is case-insensitive, and is stored and looked up as lowercase.
+// NOTE: this function must only be called during initialization time (i.e. in
+// an init() function), and is not thread-safe.  If multiple Compressors are
+// registered with the same name, the one registered last will take effect.
 func RegisterCodec(codec Codec) {
 	registeredCodecs[codec.Name()] = codec
 }
 
+// GetCodec gets a registered Codec by codec name
 func GetCodec(name string) Codec {
 	return registeredCodecs[name]
 }
@@ -37,12 +50,7 @@ type Compressor interface {
 
 var registeredCompressor = make(map[string]Compressor)
 
-// RegisterCompressor registers the compressor with gRPC by its name.  It can
-// be activated when sending an RPC via grpc.UseCompressor().  It will be
-// automatically accessed when receiving a message based on the content coding
-// header.  Servers also use it to send a response with the same encoding as
-// the request.
-//
+// RegisterCompressor registers the compressor with exposed by its name.  It can
 // NOTE: this function must only be called during initialization time (i.e. in
 // an init() function), and is not thread-safe.  If multiple Compressors are
 // registered with the same name, the one registered last will take effect.
