@@ -86,9 +86,42 @@ func main() {
         fmt.Println(resp)
 }
 ```
-**Benchmark**
+### Generate service from interface definition
 
-### server and client, on the same machine (Intel(R) Core(TM) i7-7700HQ CPU @ 2.80GHz | 8GB)
+```sh
+go get github.com/thesyncim/expose
+```
+
+this will download and install *expose* a codegen tool to generate an exposed service from your interface definition
+
+lets looks at the example
+
+```go
+package echo
+
+type Echoer interface {
+	Echo(msg []byte) (ret []byte)
+}
+
+type Echo struct {
+}
+
+func (Echo) Echo(msg []byte) []byte {
+	return msg
+}
+
+```
+ ```sh 
+ expose gen -i  Echoer -p github.com/thesyncim/exposed/examples/echo -s echoservice -o echoservice
+ ```
+ this will generate all the [boilerplate code](https://github.com/thesyncim/exposed/tree/master/examples/echo/echoservice) to expose your interface as an service 
+ 
+
+
+
+### Benchmark
+
+***server and client, on the same machine (Intel(R) Core(TM) i7-7700HQ CPU @ 2.80GHz | 8GB)***
 
 Framework|payload size (bytes)|number clients| concurrency | op/s |MB/s| p50(ms)|p95(ms)|p99(ms)|Max(ms)|number GC|Total memory allocated
 -------------|-------------|-------------|-------------|-------------|-------------|-------------|-------------|-------------|-------------|-------------|-------------
