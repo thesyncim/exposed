@@ -16,7 +16,7 @@ import (
 	"encoding/binary"
 	"github.com/cespare/xxhash"
 	"github.com/thesyncim/exposed/encoding"
-	"github.com/thesyncim/exposed/encoding/proto"
+	"github.com/thesyncim/exposed/encoding/codec/proto"
 )
 
 // requestWriter is an interface for writing rpc request to buffered writer.

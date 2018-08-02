@@ -14,7 +14,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/thesyncim/exposed/encoding"
-	"github.com/thesyncim/exposed/encoding/proto"
+	"github.com/thesyncim/exposed/encoding/codec/proto"
 	"golang.org/x/net/trace"
 	"net/http"
 	"runtime"
