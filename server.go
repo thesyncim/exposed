@@ -488,7 +488,7 @@ func ServerMaxBatchDelay(d time.Duration) ServerOption {
 }
 
 //ServerCodec specifies the encoding codec to be used to marshal/unmarshal messages
-//its possible to achive zero copy with carefully writen codecs
+//its possible to achive zero copy with carefully written codecs
 func ServerCodec(co string) ServerOption {
 	return func(c *serverOptions) {
 		c.Codec = encoding.GetCodec(co)
