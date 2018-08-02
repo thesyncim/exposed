@@ -78,7 +78,7 @@ func (resp *response) WriteResponse(bw *bufio.Writer) error {
 
 // ReadResponse reads the response from br.
 //
-// It implements fastrpc.ReadResponse.
+// It implements exposed.ReadResponse.
 func (resp *response) ReadResponse(br *bufio.Reader) error {
 	var err error
 	resp.payload, err = readBytes(br, resp.payload[:0], resp.sizeBuf[:])

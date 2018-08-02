@@ -173,12 +173,12 @@ func (s *Server) Serve(ln net.Listener) error {
 				panic("BUG: net.Listener returned non-nil conn and non-nil error")
 			}
 			if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
-				s.logger().Printf("fastrpc.Server: temporary error when accepting new connections: %s", netErr)
+				s.logger().Printf("exposed.Server: temporary error when accepting new connections: %s", netErr)
 				time.Sleep(time.Second)
 				continue
 			}
 			if err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection") {
-				s.logger().Printf("fastrpc.Server: permanent error when accepting new connections: %s", err)
+				s.logger().Printf("exposed.Server: permanent error when accepting new connections: %s", err)
 				return err
 			}
 			return nil
@@ -196,7 +196,7 @@ func (s *Server) Serve(ln net.Listener) error {
 		n := int(atomic.LoadUint32(&s.concurrencyCount))
 		if n > concurrency {
 
-			s.logger().Printf("fastrpc.Server: concurrency limit exceeded: %d", concurrency)
+			s.logger().Printf("exposed.Server: concurrency limit exceeded: %d", concurrency)
 			continue
 		}
 
@@ -204,7 +204,7 @@ func (s *Server) Serve(ln net.Listener) error {
 			laddr := conn.LocalAddr().String()
 			raddr := conn.RemoteAddr().String()
 			if err := s.serveConn(conn); err != nil {
-				s.logger().Printf("fastrpc.Server: error on connection %q<->%q: %s", laddr, raddr, err)
+				s.logger().Printf("exposed.Server: error on connection %q<->%q: %s", laddr, raddr, err)
 			}
 			/*	if pipelineRequests {
 					atomic.AddUint32(&s.concurrencyCount, ^uint32(0))

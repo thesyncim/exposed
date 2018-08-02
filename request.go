@@ -64,7 +64,7 @@ func (req *request) Payload() []byte {
 
 // WriteRequest writes the request to bw.
 //
-// It implements fastrpc.RequestWriter
+// It implements exposed.RequestWriter
 func (req *request) WriteRequest(bw *bufio.Writer) error {
 	if err := writeOperation(bw, req.operation, req.opBuf[:]); err != nil {
 		return fmt.Errorf("cannot write request operation: %s", err)
