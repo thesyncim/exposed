@@ -69,7 +69,7 @@ func (h *exposedCtx) Handle(ctxv *exposedCtx) (rctxv *exposedCtx) {
 }
 
 func (h *exposedCtx) ConcurrencyLimitError(concurrency int) {
-	h.Response.SwapError([]byte("max concurrency excedded"))
+	h.Response.SwapError([]byte("max concurrency exceeded"))
 }
 
 func (h *exposedCtx) Init(conn net.Conn, logger *zerolog.Logger) {

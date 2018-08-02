@@ -494,7 +494,7 @@ func TestServerConcurrencyLimit(t *testing.T) {
 		if err := c.DoDeadline(&req, &resp, time.Now().Add(time.Second)); err != nil {
 			t.Fatalf("unexpected error on iteration %d: %s", i, err)
 		}
-		if string(resp.Error()) != "max concurrency excedded" {
+		if string(resp.Error()) != "max concurrency exceeded" {
 			t.Fatalf("unexpected response on iteration %d: %q. Expecting %q", i, resp.Error(), "too many requests")
 		}
 	}
