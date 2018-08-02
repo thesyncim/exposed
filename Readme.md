@@ -42,7 +42,7 @@ func main() {
 
         server.RegisterHandleFunc("echo",
                 func(ctx *exposed.Context, req exposed.Message, resp exposed.Message) (err error) {
-                        *resp.(*string) = *req.(*string)
+                        resp.(*string) = req.(*string)
                         return nil
                 },
                 &exposed.OperationTypes{
