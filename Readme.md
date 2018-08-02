@@ -11,7 +11,7 @@ the following features are currently available:
 
 - requests with timeout/cancellation 
 
-- codecs - specify your own codec to marshal/unmarshal messages (is possible to achieve zero copy with carefully written codecs)
+- codecs - specify your own codec to marshal/unmarshal messages
 
 - [**`expose`**](https://github.com/thesyncim/expose) - codegen utility to generate exposed services from interface definitions
 ## Getting Started
