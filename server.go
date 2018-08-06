@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"encoding/binary"
 	"github.com/rs/zerolog"
 	"github.com/thesyncim/exposed/encoding"
 	"github.com/thesyncim/exposed/encoding/codec/proto"
@@ -87,6 +88,10 @@ var defaultServerOptions = serverOptions{
 	MaxBatchDelay:   0,
 }
 
+var (
+	typeUnarycall = []byte{byte(0)}
+)
+
 // Server accepts rpc requests from Client.
 type Server struct {
 	opts serverOptions
@@ -114,7 +119,7 @@ type Server struct {
 	// The handler may return ctx passed to the call only if the ctx
 	// is no longer used after returning from the handler.
 	// Otherwise new ctx must be returned.
-	Handler func(ctx *exposedCtx) *exposedCtx
+	Handler func(ctx *exposedCtx, stream Stream) *exposedCtx
 
 	// Logger, which is used by the Server.
 	//
@@ -123,6 +128,11 @@ type Server struct {
 
 	events     trace.EventLog
 	eventsLock sync.Mutex
+
+	//type map[uint32]chan *request
+	inStreamMsg map[uint32]chan *request
+
+	outStreamMessages chan *serverStreamOut
 
 	workItemPool sync.Pool
 
@@ -142,6 +152,8 @@ func NewServer(opts ...ServerOption) *Server {
 	}
 	eHandler := newExposedCtx(s.opts.Codec)().Handle
 	s.Handler = eHandler
+	s.inStreamMsg = map[uint32]chan *request{}
+	s.outStreamMessages = make(chan *serverStreamOut, 1)
 	s.NewHandlerCtx = newExposedCtx(s.opts.Codec)
 
 	return s
@@ -201,6 +213,27 @@ func (s *Server) Serve(ln net.Listener) error {
 	}
 }
 
+type serverStreamOut struct {
+	streamID uint32
+	sobuf    [4]byte
+	*response
+	error chan error
+}
+
+var stwpool sync.Pool
+
+func acquireServerStreamOut() *serverStreamOut {
+	v := stwpool.Get()
+	if v == nil {
+		return &serverStreamOut{}
+	}
+
+	return v.(*serverStreamOut)
+}
+
+func releaseServerStreamOut(sso *serverStreamOut) {
+	stwpool.Put(sso)
+}
 func (s *Server) serveConn(conn net.Conn) error {
 
 	cfg := &handshakeConfig{
@@ -222,14 +255,15 @@ func (s *Server) serveConn(conn net.Conn) error {
 	stopCh := make(chan struct{})
 
 	pendingResponses := make(chan *serverWorkItem, s.concurrency())
+	outStream := make(chan *serverStreamOut, 10000)
 	readerDone := make(chan error, 1)
 	go func() {
-		readerDone <- s.connReader(br, pipelineRequests, conn, pendingResponses, stopCh)
+		readerDone <- s.connReader(br, pipelineRequests, conn, pendingResponses, outStream, stopCh)
 	}()
 
 	writerDone := make(chan error, 1)
 	go func() {
-		writerDone <- s.connWriter(bw, conn, pendingResponses, stopCh)
+		writerDone <- s.connWriter(bw, conn, pendingResponses, s.outStreamMessages, stopCh)
 	}()
 
 	select {
@@ -242,14 +276,16 @@ func (s *Server) serveConn(conn net.Conn) error {
 		close(stopCh)
 		<-readerDone
 	}
+	close(outStream)
 	return err
 }
 
-func (s *Server) connReader(br *bufio.Reader, pipeline bool, conn net.Conn, pendingResponses chan<- *serverWorkItem, stopCh <-chan struct{}) error {
+func (s *Server) connReader(br *bufio.Reader, pipeline bool, conn net.Conn, pendingResponses chan<- *serverWorkItem, streamOut chan<- *serverStreamOut, stopCh <-chan struct{}) error {
 	logger := s.logger()
 	concurrency := s.concurrency()
 	pipelineRequests := pipeline
 	readTimeout := s.opts.ReadTimeout
+	var streamCrtlBuf [1]byte
 	var lastReadDeadline time.Time
 	for {
 		wi := s.acquireWorkItem()
@@ -270,6 +306,30 @@ func (s *Server) connReader(br *bufio.Reader, pipeline bool, conn net.Conn, pend
 			}
 		}
 
+		if n, err := io.ReadFull(br, streamCrtlBuf[:]); err != nil {
+			if n == 0 {
+				// Ignore error if no bytes are read, since
+				// the client may just close the connection.
+				return nil
+			}
+			//wi.event.Errorf("cannot read request ID: %s", err)
+
+			return fmt.Errorf("cannot read streamCrtlBuf ID: %s", err)
+		}
+		isStream := streamCrtlBuf[0] == 2
+		isStartStream := streamCrtlBuf[0] == 1
+
+		if n, err := io.ReadFull(br, wi.streamID[:]); err != nil {
+			if n == 0 {
+				// Ignore error if no bytes are read, since
+				// the client may just close the connection.
+				return nil
+			}
+			//wi.event.Errorf("cannot read request ID: %s", err)
+
+			return fmt.Errorf("cannot read request stream ID: %s", err)
+		}
+
 		if n, err := io.ReadFull(br, wi.reqID[:]); err != nil {
 			if n == 0 {
 				// Ignore error if no bytes are read, since
@@ -281,17 +341,30 @@ func (s *Server) connReader(br *bufio.Reader, pipeline bool, conn net.Conn, pend
 			return fmt.Errorf("cannot read request ID: %s", err)
 		}
 
-		wi.ctx.Init(conn, logger)
-		if err := wi.ctx.ReadRequest(br); err != nil {
-			//	wi.event.Errorf("cannot read request: %s", err)
-			return fmt.Errorf("cannot read request: %s", err)
-		}
+		if isStream {
+			req := acquireRequest()
+			//the stream exists
+			if inStream, ok := s.inStreamMsg[binary.BigEndian.Uint32(wi.streamID[:])]; ok {
+				if err := req.ReadRequest(br); err != nil {
+					//	wi.event.Errorf("cannot read request: %s", err)
+					close(inStream)
+					return fmt.Errorf("cannot read request: %s", err)
+				}
+				inStream <- req
 
-		if pipelineRequests {
-			atomic.AddUint32(&s.concurrencyCount, 1)
-			s.handleRequest(wi, pendingResponses, stopCh)
-			atomic.AddUint32(&s.concurrencyCount, ^uint32(0))
-		} else {
+			} else { //create the stream handler
+				panic("stream doesnt exists")
+
+			}
+
+		} else if isStartStream {
+			wi.ctx.Init(conn, logger)
+			wi.startStream = isStartStream
+			if err := wi.ctx.ReadRequest(br); err != nil {
+				//	wi.event.Errorf("cannot read request: %s", err)
+				return fmt.Errorf("cannot read request: %s", err)
+			}
+
 			n := int(atomic.AddUint32(&s.concurrencyCount, 1))
 			if n > concurrency {
 				atomic.AddUint32(&s.concurrencyCount, ^uint32(0))
@@ -301,19 +374,63 @@ func (s *Server) connReader(br *bufio.Reader, pipeline bool, conn net.Conn, pend
 				}
 				continue
 			}
+
+			var stream *StreamServer
+			if wi.startStream {
+				in := make(chan *request, 1)
+				streamID := binary.BigEndian.Uint32(wi.streamID[:])
+				s.inStreamMsg[streamID] = in
+				stream = NewServerStream(streamID, s.opts.Codec, in, func(id uint32, m *response, resp chan error) {
+					so := acquireServerStreamOut()
+					so.streamID = streamID
+					so.response = m
+					so.error = resp
+
+					s.outStreamMessages <- so
+				})
+			}
 			go func(wi *serverWorkItem) {
-				s.handleRequest(wi, pendingResponses, stopCh)
+				s.handleRequest(wi, pendingResponses, stream, stopCh)
 				atomic.AddUint32(&s.concurrencyCount, ^uint32(0))
 			}(wi)
+
+		} else {
+
+			wi.ctx.Init(conn, logger)
+			if err := wi.ctx.ReadRequest(br); err != nil {
+				//	wi.event.Errorf("cannot read request: %s", err)
+				return fmt.Errorf("cannot read request: %s", err)
+			}
+
+			if pipelineRequests {
+				atomic.AddUint32(&s.concurrencyCount, 1)
+				s.handleRequest(wi, pendingResponses, nil, stopCh)
+				atomic.AddUint32(&s.concurrencyCount, ^uint32(0))
+			} else {
+				n := int(atomic.AddUint32(&s.concurrencyCount, 1))
+				if n > concurrency {
+					atomic.AddUint32(&s.concurrencyCount, ^uint32(0))
+					wi.ctx.ConcurrencyLimitError(concurrency)
+					if !pushPendingResponse(pendingResponses, wi, stopCh) {
+						return nil
+					}
+					continue
+				}
+				go func(wi *serverWorkItem) {
+					s.handleRequest(wi, pendingResponses, nil, stopCh)
+					atomic.AddUint32(&s.concurrencyCount, ^uint32(0))
+				}(wi)
+			}
 		}
+
 	}
 }
 
-func (s *Server) handleRequest(wi *serverWorkItem, pendingResponses chan<- *serverWorkItem, stopCh <-chan struct{}) {
+func (s *Server) handleRequest(wi *serverWorkItem, pendingResponses chan<- *serverWorkItem, stream *StreamServer, stopCh <-chan struct{}) {
 	reqID := wi.reqID
 	//wi.event.Printf("start handling request id %v", binary.BigEndian.Uint32(reqID[:]))
 
-	ctxNew := s.Handler(wi.ctx)
+	ctxNew := s.Handler(wi.ctx, stream)
 	//wi.event.Printf("finish handling request id %v", binary.BigEndian.Uint32(reqID[:]))
 
 	if isZeroReqID(reqID) {
@@ -336,6 +453,7 @@ func (s *Server) handleRequest(wi *serverWorkItem, pendingResponses chan<- *serv
 		wi.ctx = ctxNew
 	}
 	pushPendingResponse(pendingResponses, wi, stopCh)
+
 }
 
 func (s *Server) RegisterService(e Exposable) {
@@ -359,13 +477,17 @@ func pushPendingResponse(pendingResponses chan<- *serverWorkItem, wi *serverWork
 	return true
 }
 
-func (s *Server) connWriter(bw *bufio.Writer, conn net.Conn, pendingResponses <-chan *serverWorkItem, stopCh <-chan struct{}) error {
+func (s *Server) connWriter(bw *bufio.Writer, conn net.Conn, pendingResponses <-chan *serverWorkItem, streamOut <-chan *serverStreamOut, stopCh <-chan struct{}) error {
 	var wi *serverWorkItem
+	var so *serverStreamOut
 
 	var (
 		flushTimer    = getFlushTimer()
 		flushCh       <-chan time.Time
 		flushAlwaysCh = make(chan time.Time)
+		unarycall     = []byte{byte(0)}
+		streamcall    = []byte{byte(1)}
+		streamIDbuf   [4]byte
 	)
 	defer putFlushTimer(flushTimer)
 
@@ -380,9 +502,11 @@ func (s *Server) connWriter(bw *bufio.Writer, conn net.Conn, pendingResponses <-
 	for {
 		select {
 		case wi = <-pendingResponses:
+		case so = <-streamOut:
 		default:
 			select {
 			case wi = <-pendingResponses:
+			case so = <-streamOut:
 			case <-stopCh:
 				return nil
 			case <-flushCh:
@@ -409,30 +533,65 @@ func (s *Server) connWriter(bw *bufio.Writer, conn net.Conn, pendingResponses <-
 			}
 		}
 
-		if _, err := bw.Write(wi.reqID[:]); err != nil {
-			return fmt.Errorf("cannot write response ID: %s", err)
-		}
-		if err := wi.ctx.WriteResponse(bw); err != nil {
-			return fmt.Errorf("cannot write response: %s", err)
-		}
+		if so != nil {
 
-		s.releaseWorkItem(wi)
+			if _, err := bw.Write(streamcall); err != nil {
+				so.error <- err
+				so = nil
+				return fmt.Errorf("cannot write isStream: %s", err)
+			}
 
-		// re-arm flush channel
-		if flushCh == nil && len(pendingResponses) == 0 {
-			if maxBatchDelay > 0 {
-				resetFlushTimer(flushTimer, maxBatchDelay)
-				flushCh = flushTimer.C
-			} else {
-				flushCh = flushAlwaysCh
+			binary.BigEndian.PutUint32(streamIDbuf[:], so.streamID)
+
+			if _, err := bw.Write(streamIDbuf[:]); err != nil {
+				so.error <- err
+				so = nil
+				return fmt.Errorf("cannot write stream ID: %s", err)
+			}
+			if err := so.response.WriteResponse(bw); err != nil {
+				so.error <- err
+				so = nil
+				return fmt.Errorf("cannot write stream response: %s", err)
+			}
+			so.error <- nil
+			ReleaseResponse(so.response)
+			releaseServerStreamOut(so)
+
+			flushCh = flushAlwaysCh
+			so = nil
+		} else {
+			if _, err := bw.Write(unarycall); err != nil {
+				return fmt.Errorf("cannot write isStream: %s", err)
+			}
+
+			if _, err := bw.Write(wi.reqID[:]); err != nil {
+				return fmt.Errorf("cannot write response ID: %s", err)
+			}
+			if err := wi.ctx.WriteResponse(bw); err != nil {
+				return fmt.Errorf("cannot write response: %s", err)
+			}
+
+			s.releaseWorkItem(wi)
+
+			// re-arm flush channel
+			if flushCh == nil && len(pendingResponses) == 0 {
+				if maxBatchDelay > 0 {
+					resetFlushTimer(flushTimer, maxBatchDelay)
+					flushCh = flushTimer.C
+				} else {
+					flushCh = flushAlwaysCh
+				}
 			}
 		}
+
 	}
 }
 
 type serverWorkItem struct {
-	ctx   *exposedCtx
-	reqID [4]byte
+	ctx         *exposedCtx
+	startStream bool
+	reqID       [4]byte
+	streamID    [4]byte
 }
 
 func (s *Server) acquireWorkItem() *serverWorkItem {

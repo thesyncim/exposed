@@ -53,7 +53,7 @@ func main() {
 
         server.HandleFunc("echo",
                 func(ctx *exposed.Context, req exposed.Message, resp exposed.Message) (err error) {
-                        resp.(*string) = req.(*string)
+                        (*req.(*string)) = (*resp.(*string))
                         return nil
                 },
                 &exposed.OperationTypes{

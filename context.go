@@ -2,5 +2,11 @@ package exposed
 
 //context is passed to every Handler
 type Context struct {
-	//Stream    Stream
+	//StreamServer    StreamServer
+	Stream Stream
+}
+
+type Stream interface {
+	SendMsg(m Message) error
+	RecvMsg(m Message) (err error)
 }

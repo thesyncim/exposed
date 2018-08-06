@@ -62,7 +62,7 @@ func registerService(e Exposable) {
 func registerHandleFunc(path string, handlerFunc HandlerFunc, info *OperationTypes) {
 	op := xxhash.Sum64String(path)
 	if _, ok := operationHandlers[op]; ok {
-		panic(errOperationAlreadyRegistered.Error() + " " + path)
+		//	panic(errOperationAlreadyRegistered.Error() + " " + path)
 	}
 	registerOperationInfo(path, info)
 	operationHandlers[op] = handlerFunc

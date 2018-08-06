@@ -100,7 +100,7 @@ func BenchmarkSendNowait(b *testing.B) {
 		ServerMaxConcurrency(uint32(runtime.GOMAXPROCS(-1) + 1)),
 	)
 	s.NewHandlerCtx = newTestHandlerCtx
-	s.Handler = func(ctxv *exposedCtx) *exposedCtx {
+	s.Handler = func(ctxv *exposedCtx, _ Stream) *exposedCtx {
 		x := atomic.AddUint64(&n, 1)
 		if x == bN {
 			close(doneCh)
@@ -173,7 +173,7 @@ func benchmarkEndToEnd(b *testing.B, parallelism int, batchDelay time.Duration, 
 		ServerTlsConfig(tlsConfig),
 	)
 	s.NewHandlerCtx = newTestHandlerCtx
-	s.Handler = func(ctxv *exposedCtx) *exposedCtx {
+	s.Handler = func(ctxv *exposedCtx, _ Stream) *exposedCtx {
 		ctx := ctxv
 		ctx.Response.SwapPayload(expectedBody)
 		return ctx

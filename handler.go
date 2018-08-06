@@ -27,7 +27,7 @@ func newExposedCtx(codec encoding.Codec) func() *exposedCtx {
 	}
 }
 
-func (h *exposedCtx) Handle(ctxv *exposedCtx) (rctxv *exposedCtx) {
+func (h *exposedCtx) Handle(ctxv *exposedCtx, stream Stream) (rctxv *exposedCtx) {
 
 	eh := ctxv
 	defer func() {
@@ -53,7 +53,7 @@ func (h *exposedCtx) Handle(ctxv *exposedCtx) (rctxv *exposedCtx) {
 	}
 	reply := opinfo.ReplyType()
 
-	if err = handler(nil, args, reply); err != nil {
+	if err = handler(&Context{stream}, args, reply); err != nil {
 		eh.Response.SwapError([]byte(err.Error()))
 		return ctxv
 	}

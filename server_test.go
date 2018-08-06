@@ -237,7 +237,7 @@ func TestServerNewCtxConcurrent(t *testing.T) {
 
 func TestServerTimeoutSerial(t *testing.T) {
 	stopCh := make(chan struct{})
-	h := func(ctx *exposedCtx) *exposedCtx {
+	h := func(ctx *exposedCtx, s Stream) *exposedCtx {
 		<-stopCh
 		return ctx
 	}
@@ -256,7 +256,7 @@ func TestServerTimeoutSerial(t *testing.T) {
 
 func TestServerTimeoutConcurrent(t *testing.T) {
 	stopCh := make(chan struct{})
-	h := func(ctx *exposedCtx) *exposedCtx {
+	h := func(ctx *exposedCtx, s Stream) *exposedCtx {
 		<-stopCh
 		return ctx
 	}
@@ -445,7 +445,7 @@ func TestServerConcurrencyLimit(t *testing.T) {
 
 	s := NewServer()
 	s.NewHandlerCtx = newTestHandlerCtx
-	s.Handler = func(ctxv *exposedCtx) *exposedCtx {
+	s.Handler = func(ctxv *exposedCtx, s Stream) *exposedCtx {
 		concurrencyCh <- struct{}{}
 		<-doneCh
 		ctx := ctxv
@@ -521,7 +521,7 @@ func TestServerClientSendNowait(t *testing.T) {
 	const iterations = 100
 	const concurrency = 10
 	callsCh := make(chan struct{}, concurrency*iterations)
-	h := func(ctxv *exposedCtx) *exposedCtx {
+	h := func(ctxv *exposedCtx, _ Stream) *exposedCtx {
 		ctx := ctxv
 		s := string(ctx.Request.Payload())
 		if strings.HasPrefix(s, "foobar ") {
@@ -758,7 +758,7 @@ func testNewCtx(c *Client) error {
 	return nil
 }
 
-func newTestServerClient(handler func(*exposedCtx) *exposedCtx) (func() error, *Client) {
+func newTestServerClient(handler func(*exposedCtx, Stream) *exposedCtx) (func() error, *Client) {
 	serverStop, ln := newTestServer(handler)
 	c := newTestClient(ln)
 	return serverStop, c
@@ -770,7 +770,7 @@ func newTestServerClientExt(s *Server) (func() error, *Client) {
 	return serverStop, c
 }
 
-func newTestServer(handler func(*exposedCtx) *exposedCtx) (func() error, *fasthttputil.InmemoryListener) {
+func newTestServer(handler func(*exposedCtx, Stream) *exposedCtx) (func() error, *fasthttputil.InmemoryListener) {
 	s := NewServer()
 	s.NewHandlerCtx = newTestHandlerCtx
 	s.Handler = handler
@@ -808,20 +808,20 @@ func newTestClient(ln *fasthttputil.InmemoryListener) *Client {
 	return c
 }
 
-func testNewCtxHandler(ctxv *exposedCtx) *exposedCtx {
+func testNewCtxHandler(ctxv *exposedCtx, s Stream) *exposedCtx {
 	ctxvNew := newTestHandlerCtx()
 	ctx := ctxvNew
 	ctx.Response.Write([]byte("new ctx!"))
 	return ctx
 }
 
-func testEchoHandler(ctxv *exposedCtx) *exposedCtx {
+func testEchoHandler(ctxv *exposedCtx, s Stream) *exposedCtx {
 	ctx := ctxv
 	ctx.Response.Write(ctx.Request.Payload())
 	return ctx
 }
 
-func testSleepHandler(ctxv *exposedCtx) *exposedCtx {
+func testSleepHandler(ctxv *exposedCtx, _ Stream) *exposedCtx {
 	sleepDuration := time.Duration(rand.Intn(30)) * time.Millisecond
 	time.Sleep(sleepDuration)
 	s := fmt.Sprintf("slept for %s", sleepDuration)

@@ -114,8 +114,19 @@ func TestClientBrokenServerGarbageResponse(t *testing.T) {
 
 func TestClientBrokenServerCheckRequest(t *testing.T) {
 	testClientBrokenServer(t, func(conn net.Conn) error {
+		var isStream [1]byte
+		_, err := io.ReadFull(conn, isStream[:])
+		if err != nil {
+			return fmt.Errorf("cannot read reqID from the client: %s", err)
+		}
+		_ = isStream
+		var streamID [4]byte
+		_, err = io.ReadFull(conn, streamID[:])
+		if err != nil {
+			return fmt.Errorf("cannot read reqID from the client: %s", err)
+		}
 		var reqID [4]byte
-		_, err := io.ReadFull(conn, reqID[:])
+		_, err = io.ReadFull(conn, reqID[:])
 		if err != nil {
 			return fmt.Errorf("cannot read reqID from the client: %s", err)
 		}
