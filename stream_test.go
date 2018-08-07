@@ -1,8 +1,8 @@
 package exposed
 
 import (
-	"github.com/pkg/profile"
-	"github.com/thesyncim/exposed/encoding/codec/json"
+	"github.com/thesyncim/exposed/encoding/codec/proto"
+	"github.com/thesyncim/exposed/test/echoservice"
 	"log"
 	"net"
 	"strconv"
@@ -23,11 +23,11 @@ func init() {
 	}
 
 	s = NewServer(
-		ServerCodec(json.CodecName),
+		ServerCodec(proto.CodecName),
 	)
 
 	c = NewClient("127.0.0.1:7654",
-		ClientCodec(json.CodecName),
+		ClientCodec(proto.CodecName),
 	)
 }
 
@@ -43,20 +43,20 @@ func serveOnce() {
 
 func BenchmarkStream(t *testing.B) {
 	serveOnce()
-	p := profile.Start(profile.MemProfile, profile.ProfilePath("."), profile.NoShutdownHook)
-	defer p.Stop()
+	/*p := profile.Start(profile.CPUProfile, profile.ProfilePath("."), profile.NoShutdownHook)
+	defer p.Stop()*/
 
 	s.HandleFunc("stream", func(ctx *Context, req Message, resp Message) (err error) {
-		var m string
+		var m echoservice.EchoRequest
 		if err := ctx.Stream.RecvMsg(&m); err != nil {
 			return err
 		}
 
-		n, err := strconv.Atoi(*req.(*string))
-		log.Println(n)
+		n, err := strconv.Atoi(string(req.(*echoservice.EchoRequest).Msg))
 
+		out := echoservice.EchoReply{}
 		for i := 0; i < n; i++ {
-			err = ctx.Stream.SendMsg(&m)
+			err = ctx.Stream.SendMsg(&out)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -64,31 +64,29 @@ func BenchmarkStream(t *testing.B) {
 
 			}
 		}
-		(*resp.(*string)) = m
+		(*resp.(*echoservice.EchoReply)) = out
 
 		return err
 	}, &OperationTypes{
 		ReplyType: func() Message {
-			return new(string)
+			return new(echoservice.EchoReply)
 		},
 		ArgsType: func() Message {
-			return new(string)
+			return new(echoservice.EchoRequest)
 		},
 	})
 
-	var request = strconv.Itoa(t.N / 2)
-	var response = ""
-
+	var request = echoservice.EchoRequest{Msg: []byte(strconv.Itoa(t.N / 2))}
+	var response echoservice.EchoReply
+	var r echoservice.EchoReply
 	err := c.CallStream("stream", &request, &response, func(client *StreamClient) error {
 		t.ResetTimer()
 		t.ReportAllocs()
 
-		err := client.SendMsg(request)
+		err := client.SendMsg(&request)
 		if err != nil {
 			return err
 		}
-
-		var r string
 
 		for i := 0; i < t.N/2; i++ {
 			err = client.RecvMsg(&r)
@@ -104,5 +102,4 @@ func BenchmarkStream(t *testing.B) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	log.Println(response)
 }

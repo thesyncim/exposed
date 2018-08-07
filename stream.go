@@ -3,6 +3,8 @@ package exposed
 import (
 	"errors"
 	"github.com/thesyncim/exposed/encoding"
+	"log"
+	"sync/atomic"
 )
 
 type StreamServer struct {
@@ -14,22 +16,69 @@ type StreamServer struct {
 	inMessages chan *request
 	errOutCh   chan error
 
-	sendOutMessages func(id uint32, m *response, resp chan error)
-	inClosed        bool
-	outClosed       bool
+	streamOutMessage chan *serverStreamOut
+	serverOutMessage chan<- *serverStreamOut
+	inClosed         uint32
+	outClosed        uint32
 }
 
-func NewServerStream(id uint32, codec encoding.Codec, inMessages chan *request, sendf func(id uint32, m *response, resp chan error)) *StreamServer {
-	return &StreamServer{
-		ID:              id,
-		codec:           codec,
-		inMessages:      inMessages,
-		sendOutMessages: sendf,
+func (sc *StreamServer) sendMessage(m *response, err chan error) {
+	if atomic.LoadUint32(&sc.outClosed) == 0 {
+		so := acquireServerStreamOut()
+		so.streamID = sc.ID
+		so.response = m
+		so.error = err
+		sc.streamOutMessage <- so
 	}
 }
 
+func NewServerStream(id uint32, codec encoding.Codec, inMessages chan *request, outMessages chan *serverStreamOut) *StreamServer {
+	r := &StreamServer{
+		ID:               id,
+		codec:            codec,
+		inMessages:       inMessages,
+		serverOutMessage: outMessages,
+		streamOutMessage: make(chan *serverStreamOut, 100),
+		errOutCh:         make(chan error, 1),
+	}
+	go r.outWorker()
+	return r
+}
+
+func (sc *StreamServer) Close() {
+	atomic.StoreUint32(&sc.inClosed, 1)
+	atomic.StoreUint32(&sc.outClosed, 1)
+}
+
+func (sc *StreamServer) outWorker() {
+	var m *serverStreamOut
+	var ok bool
+	for {
+		select {
+		case m, ok = <-sc.streamOutMessage:
+			if ok {
+				sc.serverOutMessage <- m
+			} else {
+				goto quit
+			}
+		default:
+			m, ok = <-sc.streamOutMessage
+			if ok {
+
+				sc.serverOutMessage <- m
+			} else {
+
+				goto quit
+			}
+
+		}
+	}
+quit:
+	log.Println(" StreamServer streamOutMessage closed")
+}
+
 func (sc *StreamServer) SendMsg(m Message) error {
-	if sc.outClosed {
+	if atomic.LoadUint32(&sc.outClosed) == 1 {
 		return errClosedWriteStream
 	}
 	v, err := sc.codec.Marshal(m)
@@ -40,12 +89,12 @@ func (sc *StreamServer) SendMsg(m Message) error {
 	resp := AcquireResponse()
 	resp.SwapPayload(v)
 	errch := make(chan error, 1)
-	sc.sendOutMessages(sc.ID, resp, errch)
+	sc.sendMessage(resp, errch)
 	return <-errch
 }
 
 func (sc *StreamServer) RecvMsg(m Message) (err error) {
-	if sc.inClosed {
+	if atomic.LoadUint32(&sc.inClosed) == 1 {
 		return errClosedReadStream
 	}
 	//todo timout
@@ -67,26 +116,67 @@ type StreamClient struct {
 
 	codec encoding.Codec
 
-	inMessages <-chan *response
-	errOutCh   chan error
+	inMessages        <-chan *response
+	serverOutMessages chan<- *clientStreamOut
+	streamOutMessages chan *clientStreamOut
 
-	sendOutMessages func(id uint32, m *request, resp chan error)
-	inClosed        bool
-	outClosed       bool
+	errOutCh chan error
+
+	inClosed  uint32
+	outClosed uint32
 }
 
-func NewStreamClient(id uint32, op uint64, codec encoding.Codec, inMessages <-chan *response, sendf func(id uint32, m *request, resp chan error)) *StreamClient {
-	return &StreamClient{
-		ID:              id,
-		op:              op,
-		codec:           codec,
-		inMessages:      inMessages,
-		sendOutMessages: sendf,
+func NewStreamClient(id uint32, op uint64, codec encoding.Codec, inMessages <-chan *response, outMessages chan<- *clientStreamOut) *StreamClient {
+	cs := &StreamClient{
+		ID:                id,
+		op:                op,
+		codec:             codec,
+		inMessages:        inMessages,
+		serverOutMessages: outMessages,
+		streamOutMessages: make(chan *clientStreamOut, 1000),
 	}
+	go cs.outWorker()
+	return cs
 }
 
+func (sc *StreamClient) sendMessage(m *request, resp chan error) {
+	if atomic.LoadUint32(&sc.outClosed) == 0 {
+		sc.streamOutMessages <- &clientStreamOut{
+			streamID: sc.ID,
+			request:  m,
+			error:    resp,
+		}
+	}
+
+}
+
+func (sc *StreamClient) outWorker() {
+	var m *clientStreamOut
+	var ok bool
+	for {
+		select {
+		case m, ok = <-sc.streamOutMessages:
+			if ok {
+				sc.serverOutMessages <- m
+			} else {
+				goto quit
+			}
+		default:
+			m, ok = <-sc.streamOutMessages
+			if ok {
+				sc.serverOutMessages <- m
+			} else {
+				goto quit
+			}
+
+		}
+	}
+quit:
+	log.Println("exiting client out worker")
+
+}
 func (sc *StreamClient) SendMsg(m Message) error {
-	if sc.outClosed {
+	if atomic.LoadUint32(&sc.outClosed) == 1 {
 		return errClosedWriteStream
 	}
 	v, err := sc.codec.Marshal(m)
@@ -97,12 +187,12 @@ func (sc *StreamClient) SendMsg(m Message) error {
 	req.SetOperation(sc.op)
 	req.SwapPayload(v)
 	errch := make(chan error, 1)
-	sc.sendOutMessages(sc.ID, req, errch)
+	sc.sendMessage(req, errch)
 	return <-errch
 }
 
 func (sc *StreamClient) RecvMsg(m Message) (err error) {
-	if sc.inClosed {
+	if atomic.LoadUint32(&sc.inClosed) == 1 {
 		return errClosedReadStream
 	}
 	//todo timout

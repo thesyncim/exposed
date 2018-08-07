@@ -88,10 +88,6 @@ var defaultServerOptions = serverOptions{
 	MaxBatchDelay:   0,
 }
 
-var (
-	typeUnarycall = []byte{byte(0)}
-)
-
 // Server accepts rpc requests from Client.
 type Server struct {
 	opts serverOptions
@@ -129,9 +125,6 @@ type Server struct {
 	events     trace.EventLog
 	eventsLock sync.Mutex
 
-	//type map[uint32]chan *request
-	inStreamMsg map[uint32]chan *request
-
 	outStreamMessages chan *serverStreamOut
 
 	workItemPool sync.Pool
@@ -152,8 +145,8 @@ func NewServer(opts ...ServerOption) *Server {
 	}
 	eHandler := newExposedCtx(s.opts.Codec)().Handle
 	s.Handler = eHandler
-	s.inStreamMsg = map[uint32]chan *request{}
-	s.outStreamMessages = make(chan *serverStreamOut, 1)
+	//s.inStreamMsg = map[uint32]chan *request{}
+	s.outStreamMessages = make(chan *serverStreamOut, 10000)
 	s.NewHandlerCtx = newExposedCtx(s.opts.Codec)
 
 	return s
@@ -254,14 +247,17 @@ func (s *Server) serveConn(conn net.Conn) error {
 
 	stopCh := make(chan struct{})
 
+	//type map[uint32]chan *request
+	var inStreamMsg sync.Map
+
 	pendingResponses := make(chan *serverWorkItem, s.concurrency())
-	outStream := make(chan *serverStreamOut, 10000)
 	readerDone := make(chan error, 1)
 	go func() {
-		readerDone <- s.connReader(br, pipelineRequests, conn, pendingResponses, outStream, stopCh)
+		readerDone <- s.connReader(br, &inStreamMsg, pipelineRequests, conn, pendingResponses, stopCh)
 	}()
 
 	writerDone := make(chan error, 1)
+
 	go func() {
 		writerDone <- s.connWriter(bw, conn, pendingResponses, s.outStreamMessages, stopCh)
 	}()
@@ -270,22 +266,32 @@ func (s *Server) serveConn(conn net.Conn) error {
 	case err = <-readerDone:
 		conn.Close()
 		close(stopCh)
+		inStreamMsg.Range(func(key, value interface{}) bool {
+			panic("das")
+			close(value.(chan *request))
+			return true
+		})
 		<-writerDone
 	case err = <-writerDone:
 		conn.Close()
+		inStreamMsg.Range(func(key, value interface{}) bool {
+			panic("das")
+			close(value.(chan *request))
+			return true
+		})
 		close(stopCh)
 		<-readerDone
 	}
-	close(outStream)
+
 	return err
 }
 
-func (s *Server) connReader(br *bufio.Reader, pipeline bool, conn net.Conn, pendingResponses chan<- *serverWorkItem, streamOut chan<- *serverStreamOut, stopCh <-chan struct{}) error {
+func (s *Server) connReader(br *bufio.Reader, inStreamMsg *sync.Map, pipeline bool, conn net.Conn, pendingResponses chan<- *serverWorkItem, stopCh <-chan struct{}) error {
 	logger := s.logger()
 	concurrency := s.concurrency()
 	pipelineRequests := pipeline
 	readTimeout := s.opts.ReadTimeout
-	var streamCrtlBuf [1]byte
+	var header = reqHeader(make([]byte, 9))
 	var lastReadDeadline time.Time
 	for {
 		wi := s.acquireWorkItem()
@@ -306,7 +312,7 @@ func (s *Server) connReader(br *bufio.Reader, pipeline bool, conn net.Conn, pend
 			}
 		}
 
-		if n, err := io.ReadFull(br, streamCrtlBuf[:]); err != nil {
+		if n, err := io.ReadFull(br, header[:]); err != nil {
 			if n == 0 {
 				// Ignore error if no bytes are read, since
 				// the client may just close the connection.
@@ -316,50 +322,29 @@ func (s *Server) connReader(br *bufio.Reader, pipeline bool, conn net.Conn, pend
 
 			return fmt.Errorf("cannot read streamCrtlBuf ID: %s", err)
 		}
-		isStream := streamCrtlBuf[0] == 2
-		isStartStream := streamCrtlBuf[0] == 1
 
-		if n, err := io.ReadFull(br, wi.streamID[:]); err != nil {
-			if n == 0 {
-				// Ignore error if no bytes are read, since
-				// the client may just close the connection.
-				return nil
-			}
-			//wi.event.Errorf("cannot read request ID: %s", err)
+		switch header.Control() {
 
-			return fmt.Errorf("cannot read request stream ID: %s", err)
-		}
-
-		if n, err := io.ReadFull(br, wi.reqID[:]); err != nil {
-			if n == 0 {
-				// Ignore error if no bytes are read, since
-				// the client may just close the connection.
-				return nil
-			}
-			//wi.event.Errorf("cannot read request ID: %s", err)
-
-			return fmt.Errorf("cannot read request ID: %s", err)
-		}
-
-		if isStream {
+		case streamMessage:
 			req := acquireRequest()
 			//the stream exists
-			if inStream, ok := s.inStreamMsg[binary.BigEndian.Uint32(wi.streamID[:])]; ok {
+			if inStream, ok := inStreamMsg.Load(header.StreamUint32ID()); ok {
 				if err := req.ReadRequest(br); err != nil {
 					//	wi.event.Errorf("cannot read request: %s", err)
-					close(inStream)
+					close(inStream.(chan *request))
 					return fmt.Errorf("cannot read request: %s", err)
 				}
-				inStream <- req
+				inStream.(chan *request) <- req
 
 			} else { //create the stream handler
 				panic("stream doesnt exists")
 
 			}
-
-		} else if isStartStream {
+		case streamStart:
+			copy(wi.streamID[:], header.StreamID())
+			copy(wi.reqID[:], header.RequestID())
 			wi.ctx.Init(conn, logger)
-			wi.startStream = isStartStream
+			wi.startStream = true
 			if err := wi.ctx.ReadRequest(br); err != nil {
 				//	wi.event.Errorf("cannot read request: %s", err)
 				return fmt.Errorf("cannot read request: %s", err)
@@ -377,25 +362,17 @@ func (s *Server) connReader(br *bufio.Reader, pipeline bool, conn net.Conn, pend
 
 			var stream *StreamServer
 			if wi.startStream {
-				in := make(chan *request, 1)
-				streamID := binary.BigEndian.Uint32(wi.streamID[:])
-				s.inStreamMsg[streamID] = in
-				stream = NewServerStream(streamID, s.opts.Codec, in, func(id uint32, m *response, resp chan error) {
-					so := acquireServerStreamOut()
-					so.streamID = streamID
-					so.response = m
-					so.error = resp
-
-					s.outStreamMessages <- so
-				})
+				in, _ := inStreamMsg.LoadOrStore(header.StreamUint32ID(), make(chan *request, 1000))
+				stream = NewServerStream(header.StreamUint32ID(), s.opts.Codec, in.(chan *request), s.outStreamMessages)
 			}
 			go func(wi *serverWorkItem) {
 				s.handleRequest(wi, pendingResponses, stream, stopCh)
 				atomic.AddUint32(&s.concurrencyCount, ^uint32(0))
 			}(wi)
 
-		} else {
-
+		case unary:
+			copy(wi.streamID[:], header.StreamID())
+			copy(wi.reqID[:], header.RequestID())
 			wi.ctx.Init(conn, logger)
 			if err := wi.ctx.ReadRequest(br); err != nil {
 				//	wi.event.Errorf("cannot read request: %s", err)
@@ -421,6 +398,7 @@ func (s *Server) connReader(br *bufio.Reader, pipeline bool, conn net.Conn, pend
 					atomic.AddUint32(&s.concurrencyCount, ^uint32(0))
 				}(wi)
 			}
+
 		}
 
 	}
@@ -432,6 +410,10 @@ func (s *Server) handleRequest(wi *serverWorkItem, pendingResponses chan<- *serv
 
 	ctxNew := s.Handler(wi.ctx, stream)
 	//wi.event.Printf("finish handling request id %v", binary.BigEndian.Uint32(reqID[:]))
+	if stream != nil {
+		close(stream.streamOutMessage)
+
+	}
 
 	if isZeroReqID(reqID) {
 		// Do not send response for SendNowait request.
@@ -485,9 +467,8 @@ func (s *Server) connWriter(bw *bufio.Writer, conn net.Conn, pendingResponses <-
 		flushTimer    = getFlushTimer()
 		flushCh       <-chan time.Time
 		flushAlwaysCh = make(chan time.Time)
-		unarycall     = []byte{byte(0)}
-		streamcall    = []byte{byte(1)}
-		streamIDbuf   [4]byte
+
+		header = respHeader(make([]byte, 5))
 	)
 	defer putFlushTimer(flushTimer)
 
@@ -534,20 +515,15 @@ func (s *Server) connWriter(bw *bufio.Writer, conn net.Conn, pendingResponses <-
 		}
 
 		if so != nil {
+			header.SetControl(streamMessage)
+			header.SetID(so.streamID)
 
-			if _, err := bw.Write(streamcall); err != nil {
+			if _, err := bw.Write(header); err != nil {
 				so.error <- err
 				so = nil
-				return fmt.Errorf("cannot write isStream: %s", err)
+				return fmt.Errorf("cannot write resp header: %s", err)
 			}
 
-			binary.BigEndian.PutUint32(streamIDbuf[:], so.streamID)
-
-			if _, err := bw.Write(streamIDbuf[:]); err != nil {
-				so.error <- err
-				so = nil
-				return fmt.Errorf("cannot write stream ID: %s", err)
-			}
 			if err := so.response.WriteResponse(bw); err != nil {
 				so.error <- err
 				so = nil
@@ -560,13 +536,14 @@ func (s *Server) connWriter(bw *bufio.Writer, conn net.Conn, pendingResponses <-
 			flushCh = flushAlwaysCh
 			so = nil
 		} else {
-			if _, err := bw.Write(unarycall); err != nil {
-				return fmt.Errorf("cannot write isStream: %s", err)
+
+			header.SetControl(unary)
+			header.SetID(binary.BigEndian.Uint32(wi.reqID[:]))
+
+			if _, err := bw.Write(header); err != nil {
+				return fmt.Errorf("cannot write header: %s", err)
 			}
 
-			if _, err := bw.Write(wi.reqID[:]); err != nil {
-				return fmt.Errorf("cannot write response ID: %s", err)
-			}
 			if err := wi.ctx.WriteResponse(bw); err != nil {
 				return fmt.Errorf("cannot write response: %s", err)
 			}
