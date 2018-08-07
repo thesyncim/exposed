@@ -37,15 +37,14 @@ var defaultClientOptions = clientOptions{
 	Dial: func(addr string) (net.Conn, error) {
 		return net.Dial("tcp", addr)
 	},
-	Codec:                 encoding.GetCodec(proto.CodecName),
-	TLSConfig:             nil,
-	CompressType:          CompressNone,
-	ReadTimeout:           time.Second * 30,
-	WriteTimeout:          time.Second * 30,
-	ReadBufferSize:        64 * 1024,
-	WriteBufferSize:       64 * 1024,
-	MaxPendingRequests:    100000,
-	PrioritizeNewRequests: false,
+	Codec:              encoding.GetCodec(proto.CodecName),
+	TLSConfig:          nil,
+	CompressType:       CompressNone,
+	ReadTimeout:        time.Second * 30,
+	WriteTimeout:       time.Second * 30,
+	ReadBufferSize:     64 * 1024,
+	WriteBufferSize:    64 * 1024,
+	MaxPendingRequests: 100000,
 }
 
 type clientOptions struct {
@@ -103,10 +102,6 @@ type clientOptions struct {
 	//Codec
 	Codec encoding.Codec
 
-	// Prioritizes new requests over old requests if MaxPendingRequests pending
-	// requests is reached.
-	PrioritizeNewRequests bool
-
 	// PipelineRequests enables requests' pipelining.
 	//
 	// Requests from a single client are processed serially
@@ -153,15 +148,13 @@ type Client struct {
 	lastErrLock sync.Mutex
 	lastErr     error
 
-	pendingRequests chan *clientWorkItem
+	pendingRequests chan WorkItem
 
-	pendingResponses     map[uint32]*clientWorkItem
+	pendingResponses     map[uint32]WorkItem
 	pendingResponsesLock sync.Mutex
 
 	incomingStreamMsg     sync.Map
 	incomingStreamMsgLock sync.Mutex
-
-	streamOutMessages chan *clientStreamOut
 
 	streamId uint32
 
@@ -189,7 +182,6 @@ func NewClient(addr string, opts ...ClientOption) (c *Client) {
 		SniffHeader:     "exposed",
 	}
 
-	c.streamOutMessages = make(chan *clientStreamOut, 100)
 	c.opts = defaultClientOptions
 
 	for _, o := range opts {
@@ -217,12 +209,12 @@ func (c *Client) SendNowait(req requestWriter, releaseReq func(req requestWriter
 	// Do not track 'nowait' request as a pending request, since it
 	// has no response.
 
-	wi := acquireClientWorkItem()
+	wi := acquireUnaryClientWorkItem()
 	wi.req = req
 	wi.releaseReq = releaseReq
 	wi.deadline = coarseTimeNow().Add(10 * time.Second)
 	if err := c.enqueueWorkItem(wi); err != nil {
-		releaseClientWorkItem(wi)
+		releaseClientUnaryWorkItem(wi)
 		return false
 	}
 	return true
@@ -242,13 +234,13 @@ func (c *Client) DoDeadline(req requestWriter, resp responseReader, deadline tim
 		return c.getError(ErrPendingRequestsOverflow)
 	}
 
-	wi := acquireClientWorkItem()
+	wi := acquireUnaryClientWorkItem()
 	wi.req = req
 	wi.resp = resp
 	wi.deadline = deadline
 	if err := c.enqueueWorkItem(wi); err != nil {
 		c.decPendingRequests()
-		releaseClientWorkItem(wi)
+		releaseClientUnaryWorkItem(wi)
 		return c.getError(err)
 	}
 
@@ -258,7 +250,7 @@ func (c *Client) DoDeadline(req requestWriter, resp responseReader, deadline tim
 	// This saves memory and CPU resources.
 	err := <-wi.done
 
-	releaseClientWorkItem(wi)
+	releaseClientUnaryWorkItem(wi)
 
 	c.decPendingRequests()
 
@@ -313,13 +305,13 @@ func (c *Client) DoContext(ctx context.Context, req requestWriter, resp response
 		return c.getError(ErrPendingRequestsOverflow)
 	}
 
-	wi := acquireClientWorkItem()
+	wi := acquireUnaryClientWorkItem()
 	wi.req = req
 	wi.resp = resp
 	wi.context = ctx
 	if err := c.enqueueWorkItem(wi); err != nil {
 		c.decPendingRequests()
-		releaseClientWorkItem(wi)
+		releaseClientUnaryWorkItem(wi)
 		return c.getError(err)
 	}
 
@@ -328,39 +320,28 @@ func (c *Client) DoContext(ctx context.Context, req requestWriter, resp response
 	// If the context finishes before we can send msg onto q,
 	// exit early
 	case <-ctx.Done():
-		releaseClientWorkItem(wi)
+		releaseClientUnaryWorkItem(wi)
 		c.decPendingRequests()
 		return ctx.Err()
 	case err = <-wi.done:
-		releaseClientWorkItem(wi)
+		releaseClientUnaryWorkItem(wi)
 		c.decPendingRequests()
 	}
 
 	return err
 }
 
-func (c *Client) enqueueWorkItem(wi *clientWorkItem) error {
+func (c *Client) enqueueWorkItem(wi WorkItem) error {
 	select {
 	case c.pendingRequests <- wi:
 		return nil
 	default:
-		if !c.opts.PrioritizeNewRequests {
-			return ErrPendingRequestsOverflow
-		}
-
-		//todo should we retry here?!
-		// slow path
 		select {
-		case wiOld := <-c.pendingRequests:
-			c.doneError(wiOld, ErrPendingRequestsOverflow)
-			select {
-			case c.pendingRequests <- wi:
-				return nil
-			default:
-				return ErrPendingRequestsOverflow
-			}
+		case c.pendingRequests <- wi:
+			return nil
 		default:
 			return ErrPendingRequestsOverflow
+
 		}
 	}
 }
@@ -375,8 +356,8 @@ func (c *Client) init() {
 	}
 
 	n := c.maxPendingRequests()
-	c.pendingRequests = make(chan *clientWorkItem, n)
-	c.pendingResponses = make(map[uint32]*clientWorkItem, n)
+	c.pendingRequests = make(chan WorkItem, n)
+	c.pendingResponses = make(map[uint32]WorkItem, n)
 
 	go func() {
 		sleepDuration := 10 * time.Millisecond
@@ -408,14 +389,29 @@ func (c *Client) unblockStaleRequests() bool {
 	for i := 0; i < n; i++ {
 		select {
 		case wi := <-c.pendingRequests:
-			if wi.context == nil && t.After(wi.deadline) {
-				c.doneError(wi, ErrTimeout)
-				found = true
-			} else {
-				if err := c.enqueueWorkItem(wi); err != nil {
-					c.doneError(wi, err)
+
+			switch wi := wi.(type) {
+			case *clientUnaryWorkItem:
+				if wi.context == nil && t.After(wi.deadline) {
+					c.doneErrorUnary(wi, ErrTimeout)
+					found = true
+				} else {
+					if err := c.enqueueWorkItem(wi); err != nil {
+						c.doneErrorUnary(wi, err)
+					}
 				}
+			case *clientStartStreamWorkItem:
+				if wi.context == nil && t.After(wi.deadline) {
+					c.doneErrorStartStream(wi, ErrTimeout)
+					found = true
+				} else {
+					if err := c.enqueueWorkItem(wi); err != nil {
+						c.doneErrorStartStream(wi, err)
+					}
+				}
+
 			}
+
 		default:
 			return found
 		}
@@ -428,11 +424,21 @@ func (c *Client) unblockStaleResponses() bool {
 	t := time.Now()
 	c.pendingResponsesLock.Lock()
 	for reqID, wi := range c.pendingResponses {
-		if wi.context == nil && t.After(wi.deadline) {
-			c.doneError(wi, ErrTimeout)
-			delete(c.pendingResponses, reqID)
-			found = true
+		switch wi := wi.(type) {
+		case *clientUnaryWorkItem:
+			if wi.context == nil && t.After(wi.deadline) {
+				c.doneErrorUnary(wi, ErrTimeout)
+				delete(c.pendingResponses, reqID)
+				found = true
+			}
+		case *clientStartStreamWorkItem:
+			if wi.context == nil && t.After(wi.deadline) {
+				c.doneErrorStartStream(wi, ErrTimeout)
+				delete(c.pendingResponses, reqID)
+				found = true
+			}
 		}
+
 	}
 	c.pendingResponsesLock.Unlock()
 	return found
@@ -454,6 +460,15 @@ func (c *Client) decPendingRequests() {
 	atomic.AddUint32(&c.pendingRequestsCount, ^uint32(0))
 }
 
+func (c *Client) doneError(wi WorkItem, err error) {
+	switch t := wi.(type) {
+	case *clientStartStreamWorkItem:
+		c.doneErrorStartStream(t, err)
+	case *clientUnaryWorkItem:
+		c.doneErrorUnary(t, err)
+	}
+
+}
 func (c *Client) worker() {
 	dial := c.opts.Dial
 	/*if dial == nil {
@@ -538,10 +553,14 @@ func (c *Client) serveConn(conn net.Conn) error {
 	return err
 }
 
-type clientStreamOut struct {
+type clientStreamMessageWorkItem struct {
 	streamID uint32
 	*request
 	error chan error
+}
+
+func (*clientStreamMessageWorkItem) Type() packetControl {
+	return streamMessage
 }
 
 func (c *Client) nextStreamID() uint32 {
@@ -575,9 +594,8 @@ func (c *Client) CallStream(opname string, req, resp Message, handleStream func(
 	rawReq.SetOperation(xxhash.Sum64String(opname))
 	rawReq.SwapPayload(v)
 
-	wi := acquireClientWorkItem()
+	wi := acquireClientStartStreamWorkItem()
 	wi.req = rawReq
-	wi.startStream = true
 	wi.streamNumber = sid
 	wi.resp = rawResp
 	wi.deadline = time.Now().Add(time.Second * 15)
@@ -585,7 +603,7 @@ func (c *Client) CallStream(opname string, req, resp Message, handleStream func(
 		releaseRequest(rawReq)
 		ReleaseResponse(rawResp)
 		c.decPendingRequests()
-		releaseClientWorkItem(wi)
+		releaseClientStartStreamWorkItem(wi)
 		return c.getError(err)
 	}
 
@@ -594,7 +612,7 @@ func (c *Client) CallStream(opname string, req, resp Message, handleStream func(
 	//
 	// This saves memory and CPU resources.
 
-	s := NewStreamClient(sid, xxhash.Sum64String(opname), c.opts.Codec, in, c.streamOutMessages)
+	s := NewStreamClient(c, sid, xxhash.Sum64String(opname), c.opts.Codec, in)
 	var wait sync.WaitGroup
 	wait.Add(1)
 
@@ -606,7 +624,7 @@ func (c *Client) CallStream(opname string, req, resp Message, handleStream func(
 		if err != nil {
 			releaseRequest(rawReq)
 			ReleaseResponse(rawResp)
-			releaseClientWorkItem(wi)
+			releaseClientStartStreamWorkItem(wi)
 			c.decPendingRequests()
 			c.getError(err)
 			return
@@ -614,14 +632,13 @@ func (c *Client) CallStream(opname string, req, resp Message, handleStream func(
 
 		err = <-wi.done
 
-		close(s.streamOutMessages)
 		close(in)
 		c.incomingStreamMsg.Delete(sid)
 
 		if err != nil {
 			releaseRequest(rawReq)
 			ReleaseResponse(rawResp)
-			releaseClientWorkItem(wi)
+			releaseClientStartStreamWorkItem(wi)
 			c.decPendingRequests()
 			c.getError(err)
 			return
@@ -630,7 +647,7 @@ func (c *Client) CallStream(opname string, req, resp Message, handleStream func(
 		if err != nil {
 			releaseRequest(rawReq)
 			ReleaseResponse(rawResp)
-			releaseClientWorkItem(wi)
+			releaseClientStartStreamWorkItem(wi)
 			c.decPendingRequests()
 			c.getError(err)
 			return
@@ -638,7 +655,7 @@ func (c *Client) CallStream(opname string, req, resp Message, handleStream func(
 
 		releaseRequest(rawReq)
 		ReleaseResponse(rawResp)
-		releaseClientWorkItem(wi)
+		releaseClientStartStreamWorkItem(wi)
 		c.decPendingRequests()
 
 	}(&wait)
@@ -649,10 +666,9 @@ func (c *Client) CallStream(opname string, req, resp Message, handleStream func(
 
 func (c *Client) connWriter(bw *bufio.Writer, conn net.Conn, stopCh <-chan struct{}) error {
 	var (
-		wi *clientWorkItem
+		wi WorkItem
 
-		streamOut *clientStreamOut
-		header    = reqHeader(make([]byte, 9))
+		header = reqHeader(make([]byte, 9))
 	)
 
 	var (
@@ -675,12 +691,10 @@ func (c *Client) connWriter(bw *bufio.Writer, conn net.Conn, stopCh <-chan struc
 	for {
 		select {
 		case wi = <-c.pendingRequests:
-		case streamOut = <-c.streamOutMessages:
 		default:
 			// slow path
 			select {
 			case wi = <-c.pendingRequests:
-			case streamOut = <-c.streamOutMessages:
 			case <-stopCh:
 				return nil
 			case <-flushCh:
@@ -693,22 +707,6 @@ func (c *Client) connWriter(bw *bufio.Writer, conn net.Conn, stopCh <-chan struc
 		}
 
 		t := coarseTimeNow()
-		if streamOut == nil && wi.context == nil && t.After(wi.deadline) {
-			c.doneError(wi, ErrTimeout)
-			continue
-		}
-		reqID := uint32(0)
-
-		if streamOut == nil {
-			if wi.resp != nil {
-				nextReqID++
-				if nextReqID == 0 {
-					nextReqID = 1
-				}
-				reqID = nextReqID
-			}
-		}
-
 		if writeTimeout > 0 {
 			// Optimization: update write deadline only if more than 25%
 			// of the last write deadline exceeded.
@@ -725,48 +723,24 @@ func (c *Client) connWriter(bw *bufio.Writer, conn net.Conn, stopCh <-chan struc
 			}
 		}
 
-		//writting stream call
-		if streamOut != nil {
-			header.SetControl(streamMessage)
-			header.SetStreamID(streamOut.streamID)
-			header.SetRequestID(0)
+		switch wi := wi.(type) {
+		case *clientUnaryWorkItem:
+			if wi.context == nil && t.After(wi.deadline) {
+				c.doneError(wi, ErrTimeout)
+				continue
+			}
+			reqID := uint32(0)
 
-			if _, err := bw.Write(header); err != nil {
-				err = fmt.Errorf("cannot send header packet to the server: %s", err)
-				streamOut.error <- err
-				close(streamOut.error)
-				streamOut = nil
-
-				return err
+			if wi.resp != nil {
+				nextReqID++
+				if nextReqID == 0 {
+					nextReqID = 1
+				}
+				reqID = nextReqID
 			}
 
-			if err := streamOut.request.WriteRequest(bw); err != nil {
-				err = fmt.Errorf("cannot send request stream to the server: %s", err)
-				streamOut.error <- err
-				close(streamOut.error)
-				streamOut = nil
-
-				return err
-			}
-
-			releaseRequest(streamOut.request)
-			streamOut.error <- nil
-			// re-arm flush channel?
-			flushCh = flushAlwaysCh
-
-			close(streamOut.error)
-			streamOut = nil
-		} else {
-
-			if wi.startStream {
-				header.SetControl(streamStart)
-				header.SetStreamID(wi.streamNumber)
-
-			} else {
-				header.SetControl(unary)
-				header.SetStreamID(0)
-
-			}
+			header.SetControl(unary)
+			header.SetStreamID(0)
 			header.SetRequestID(reqID)
 
 			if _, err := bw.Write(header[:]); err != nil {
@@ -783,7 +757,7 @@ func (c *Client) connWriter(bw *bufio.Writer, conn net.Conn, stopCh <-chan struc
 
 			if wi.resp == nil {
 				// wi is no longer needed, so release it.
-				releaseClientWorkItem(wi)
+				releaseClientUnaryWorkItem(wi)
 			} else {
 				c.pendingResponsesLock.Lock()
 				if _, ok := c.pendingResponses[reqID]; ok {
@@ -805,6 +779,93 @@ func (c *Client) connWriter(bw *bufio.Writer, conn net.Conn, stopCh <-chan struc
 					flushCh = flushAlwaysCh
 				}
 			}
+
+		case *clientStartStreamWorkItem:
+			if wi.context == nil && t.After(wi.deadline) {
+				c.doneError(wi, ErrTimeout)
+				continue
+			}
+			reqID := uint32(0)
+
+			if wi.resp != nil {
+				nextReqID++
+				if nextReqID == 0 {
+					nextReqID = 1
+				}
+				reqID = nextReqID
+			}
+
+			header.SetControl(streamStart)
+			header.SetStreamID(wi.streamNumber)
+			header.SetRequestID(reqID)
+
+			if _, err := bw.Write(header[:]); err != nil {
+				err = fmt.Errorf("cannot send request req packet header to the server: %s", err)
+				c.doneError(wi, err)
+				return err
+			}
+
+			if err := wi.req.WriteRequest(bw); err != nil {
+				err = fmt.Errorf("cannot send request to the server: %s", err)
+				c.doneError(wi, err)
+				return err
+			}
+
+			if wi.resp == nil {
+				// wi is no longer needed, so release it.
+				releaseClientStartStreamWorkItem(wi)
+			} else {
+				c.pendingResponsesLock.Lock()
+				if _, ok := c.pendingResponses[reqID]; ok {
+					c.pendingResponsesLock.Unlock()
+					err := fmt.Errorf("request ID overflow. id=%d", reqID)
+					c.doneError(wi, err)
+					return err
+				}
+				c.pendingResponses[reqID] = wi
+				c.pendingResponsesLock.Unlock()
+			}
+
+			// re-arm flush channel
+			if flushCh == nil && len(c.pendingRequests) == 0 {
+				if maxBatchDelay > 0 {
+					resetFlushTimer(flushTimer, maxBatchDelay)
+					flushCh = flushTimer.C
+				} else {
+					flushCh = flushAlwaysCh
+				}
+			}
+
+		case *clientStreamMessageWorkItem:
+			header.SetControl(streamMessage)
+			header.SetStreamID(wi.streamID)
+			header.SetRequestID(0)
+
+			if _, err := bw.Write(header); err != nil {
+				err = fmt.Errorf("cannot send header packet to the server: %s", err)
+				wi.error <- err
+				close(wi.error)
+
+				return err
+			}
+
+			if err := wi.request.WriteRequest(bw); err != nil {
+				err = fmt.Errorf("cannot send request stream to the server: %s", err)
+				wi.error <- err
+				close(wi.error)
+				wi = nil
+
+				return err
+			}
+
+			releaseRequest(wi.request)
+			wi.error <- nil
+			// re-arm flush channel?
+			flushCh = flushAlwaysCh
+
+			close(wi.error)
+			wi = nil
+
 		}
 
 	}
@@ -843,16 +904,21 @@ func (c *Client) connReader(br *bufio.Reader, conn net.Conn) error {
 		}
 
 		switch header.Control() {
-		case unary:
+		case streamStart:
 			reqID := header.Uint32ID()
 			c.pendingResponsesLock.Lock()
 			wi := c.pendingResponses[reqID]
 			delete(c.pendingResponses, reqID)
 			c.pendingResponsesLock.Unlock()
 
+			unaryWi, ok := wi.(*clientStartStreamWorkItem)
+			if !ok {
+				continue
+			}
+
 			resp = nil
 			if wi != nil {
-				resp = wi.resp
+				resp = unaryWi.resp
 			}
 			if resp == nil {
 				resp = zeroResp
@@ -867,10 +933,44 @@ func (c *Client) connReader(br *bufio.Reader, conn net.Conn) error {
 			}
 
 			if wi != nil {
-				if wi.resp == nil {
-					panic("BUG: clientWorkItem.resp must be non-nil")
+				if unaryWi.resp == nil {
+					panic("BUG: clientUnaryWorkItem.resp must be non-nil")
 				}
-				wi.done <- nil
+				unaryWi.done <- nil
+			}
+
+		case unary:
+			reqID := header.Uint32ID()
+			c.pendingResponsesLock.Lock()
+			wi := c.pendingResponses[reqID]
+			delete(c.pendingResponses, reqID)
+			c.pendingResponsesLock.Unlock()
+
+			unaryWi, ok := wi.(*clientUnaryWorkItem)
+			if !ok {
+				continue
+			}
+			resp = nil
+			if wi != nil {
+				resp = unaryWi.resp
+			}
+			if resp == nil {
+				resp = zeroResp
+			}
+
+			if err := resp.ReadResponse(br); err != nil {
+				err = fmt.Errorf("cannot read response with ID %d: %s", reqID, err)
+				if wi != nil {
+					c.doneError(wi, err)
+				}
+				return err
+			}
+
+			if wi != nil {
+				if unaryWi.resp == nil {
+					panic("BUG: clientUnaryWorkItem.resp must be non-nil")
+				}
+				unaryWi.done <- nil
 			}
 
 		case streamMessage:
@@ -890,12 +990,16 @@ func (c *Client) connReader(br *bufio.Reader, conn net.Conn) error {
 	}
 }
 
-func (c *Client) doneError(wi *clientWorkItem, err error) {
+func (c *Client) doneErrorUnary(wi *clientUnaryWorkItem, err error) {
 	if wi.resp != nil {
 		wi.done <- c.getError(err)
 	} else {
-		releaseClientWorkItem(wi)
+		releaseClientUnaryWorkItem(wi)
 	}
+}
+
+func (c *Client) doneErrorStartStream(wi *clientStartStreamWorkItem, err error) {
+	wi.done <- c.getError(err)
 }
 
 func (c *Client) getError(err error) error {
@@ -914,10 +1018,54 @@ func (c *Client) setLastError(err error) {
 	c.lastErrLock.Unlock()
 }
 
-type clientWorkItem struct {
+type clientUnaryWorkItem struct {
+	req        requestWriter
+	resp       responseReader
+	releaseReq func(req requestWriter)
+	deadline   time.Time
+	context    context.Context
+	done       chan error
+}
+
+func (*clientUnaryWorkItem) Type() packetControl {
+	return unary
+}
+
+func acquireUnaryClientWorkItem() *clientUnaryWorkItem {
+	v := clientUnaryWorkItemPool.Get()
+	if v == nil {
+		v = &clientUnaryWorkItem{
+			done: make(chan error, 1),
+		}
+	}
+	wi := v.(*clientUnaryWorkItem)
+	if len(wi.done) != 0 {
+		panic("BUG: clientUnaryWorkItem.done must be empty")
+	}
+	return wi
+}
+
+func releaseClientUnaryWorkItem(wi *clientUnaryWorkItem) {
+	if len(wi.done) != 0 {
+		panic("BUG: clientUnaryWorkItem.done must be empty")
+	}
+	if wi.releaseReq != nil {
+		if wi.resp != nil {
+			panic("BUG: clientUnaryWorkItem.resp must be nil")
+		}
+		wi.releaseReq(wi.req)
+	}
+	wi.req = nil
+	wi.resp = nil
+	wi.releaseReq = nil
+	clientUnaryWorkItemPool.Put(wi)
+}
+
+var clientUnaryWorkItemPool sync.Pool
+
+type clientStartStreamWorkItem struct {
 	req          requestWriter
 	resp         responseReader
-	startStream  bool
 	streamNumber uint32
 	releaseReq   func(req requestWriter)
 	deadline     time.Time
@@ -925,37 +1073,41 @@ type clientWorkItem struct {
 	done         chan error
 }
 
-func acquireClientWorkItem() *clientWorkItem {
-	v := clientWorkItemPool.Get()
+func (*clientStartStreamWorkItem) Type() packetControl {
+	return streamStart
+}
+
+func acquireClientStartStreamWorkItem() *clientStartStreamWorkItem {
+	v := clientStartStreamWorkItemPool.Get()
 	if v == nil {
-		v = &clientWorkItem{
+		v = &clientStartStreamWorkItem{
 			done: make(chan error, 1),
 		}
 	}
-	wi := v.(*clientWorkItem)
+	wi := v.(*clientStartStreamWorkItem)
 	if len(wi.done) != 0 {
-		panic("BUG: clientWorkItem.done must be empty")
+		panic("BUG: clientUnaryWorkItem.done must be empty")
 	}
 	return wi
 }
 
-func releaseClientWorkItem(wi *clientWorkItem) {
+func releaseClientStartStreamWorkItem(wi *clientStartStreamWorkItem) {
 	if len(wi.done) != 0 {
-		panic("BUG: clientWorkItem.done must be empty")
+		panic("BUG: clientUnaryWorkItem.done must be empty")
 	}
 	if wi.releaseReq != nil {
 		if wi.resp != nil {
-			panic("BUG: clientWorkItem.resp must be nil")
+			panic("BUG: clientUnaryWorkItem.resp must be nil")
 		}
 		wi.releaseReq(wi.req)
 	}
 	wi.req = nil
 	wi.resp = nil
 	wi.releaseReq = nil
-	clientWorkItemPool.Put(wi)
+	clientStartStreamWorkItemPool.Put(wi)
 }
 
-var clientWorkItemPool sync.Pool
+var clientStartStreamWorkItemPool sync.Pool
 
 //ClientCompression set the client compression type
 func ClientCompression(compression CompressType) ClientOption {

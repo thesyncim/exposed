@@ -125,9 +125,11 @@ type Server struct {
 	events     trace.EventLog
 	eventsLock sync.Mutex
 
-	outStreamMessages chan *serverStreamOut
+	outStreamMessages chan *serverStreamMessageWorkItem
 
-	workItemPool sync.Pool
+	unaryWorkItemPool         sync.Pool
+	streamStartWorkItemPool   sync.Pool
+	streamMessageWorkItemPool sync.Pool
 
 	concurrencyCount uint32
 }
@@ -146,7 +148,7 @@ func NewServer(opts ...ServerOption) *Server {
 	eHandler := newExposedCtx(s.opts.Codec)().Handle
 	s.Handler = eHandler
 	//s.inStreamMsg = map[uint32]chan *request{}
-	s.outStreamMessages = make(chan *serverStreamOut, 10000)
+	s.outStreamMessages = make(chan *serverStreamMessageWorkItem, 10000000)
 	s.NewHandlerCtx = newExposedCtx(s.opts.Codec)
 
 	return s
@@ -206,25 +208,32 @@ func (s *Server) Serve(ln net.Listener) error {
 	}
 }
 
-type serverStreamOut struct {
+type WorkItem interface {
+	Type() packetControl
+}
+
+type serverStreamMessageWorkItem struct {
 	streamID uint32
-	sobuf    [4]byte
 	*response
 	error chan error
 }
 
-var stwpool sync.Pool
-
-func acquireServerStreamOut() *serverStreamOut {
-	v := stwpool.Get()
-	if v == nil {
-		return &serverStreamOut{}
-	}
-
-	return v.(*serverStreamOut)
+func (*serverStreamMessageWorkItem) Type() packetControl {
+	return streamMessage
 }
 
-func releaseServerStreamOut(sso *serverStreamOut) {
+var stwpool sync.Pool
+
+func acquireServerStreamOut() *serverStreamMessageWorkItem {
+	v := stwpool.Get()
+	if v == nil {
+		return &serverStreamMessageWorkItem{}
+	}
+
+	return v.(*serverStreamMessageWorkItem)
+}
+
+func releaseServerStreamWi(sso *serverStreamMessageWorkItem) {
 	stwpool.Put(sso)
 }
 func (s *Server) serveConn(conn net.Conn) error {
@@ -250,7 +259,8 @@ func (s *Server) serveConn(conn net.Conn) error {
 	//type map[uint32]chan *request
 	var inStreamMsg sync.Map
 
-	pendingResponses := make(chan *serverWorkItem, s.concurrency())
+	pendingResponses := make(chan WorkItem, s.concurrency())
+
 	readerDone := make(chan error, 1)
 	go func() {
 		readerDone <- s.connReader(br, &inStreamMsg, pipelineRequests, conn, pendingResponses, stopCh)
@@ -259,7 +269,7 @@ func (s *Server) serveConn(conn net.Conn) error {
 	writerDone := make(chan error, 1)
 
 	go func() {
-		writerDone <- s.connWriter(bw, conn, pendingResponses, s.outStreamMessages, stopCh)
+		writerDone <- s.connWriter(bw, conn, pendingResponses, stopCh)
 	}()
 
 	select {
@@ -286,7 +296,7 @@ func (s *Server) serveConn(conn net.Conn) error {
 	return err
 }
 
-func (s *Server) connReader(br *bufio.Reader, inStreamMsg *sync.Map, pipeline bool, conn net.Conn, pendingResponses chan<- *serverWorkItem, stopCh <-chan struct{}) error {
+func (s *Server) connReader(br *bufio.Reader, inStreamMsg *sync.Map, pipeline bool, conn net.Conn, pendingResponses chan<- WorkItem, stopCh <-chan struct{}) error {
 	logger := s.logger()
 	concurrency := s.concurrency()
 	pipelineRequests := pipeline
@@ -294,7 +304,6 @@ func (s *Server) connReader(br *bufio.Reader, inStreamMsg *sync.Map, pipeline bo
 	var header = reqHeader(make([]byte, 9))
 	var lastReadDeadline time.Time
 	for {
-		wi := s.acquireWorkItem()
 
 		if readTimeout > 0 {
 			// Optimization: update read deadline only if more than 25%
@@ -319,8 +328,7 @@ func (s *Server) connReader(br *bufio.Reader, inStreamMsg *sync.Map, pipeline bo
 				return nil
 			}
 			//wi.event.Errorf("cannot read request ID: %s", err)
-
-			return fmt.Errorf("cannot read streamCrtlBuf ID: %s", err)
+			return fmt.Errorf("cannot read header ID: %s", err)
 		}
 
 		switch header.Control() {
@@ -341,6 +349,7 @@ func (s *Server) connReader(br *bufio.Reader, inStreamMsg *sync.Map, pipeline bo
 
 			}
 		case streamStart:
+			wi := s.acquireServerStreamStartWorkItem()
 			copy(wi.streamID[:], header.StreamID())
 			copy(wi.reqID[:], header.RequestID())
 			wi.ctx.Init(conn, logger)
@@ -363,14 +372,15 @@ func (s *Server) connReader(br *bufio.Reader, inStreamMsg *sync.Map, pipeline bo
 			var stream *StreamServer
 			if wi.startStream {
 				in, _ := inStreamMsg.LoadOrStore(header.StreamUint32ID(), make(chan *request, 1000))
-				stream = NewServerStream(header.StreamUint32ID(), s.opts.Codec, in.(chan *request), s.outStreamMessages)
+				stream = NewServerStream(header.StreamUint32ID(), s.opts.Codec, in.(chan *request), pendingResponses, stopCh)
 			}
-			go func(wi *serverWorkItem) {
-				s.handleRequest(wi, pendingResponses, stream, stopCh)
+			go func(wi *serverStreamStartWorkItem) {
+				s.handleStartStream(wi, pendingResponses, stream, stopCh)
 				atomic.AddUint32(&s.concurrencyCount, ^uint32(0))
 			}(wi)
 
 		case unary:
+			wi := s.acquireWorkItem()
 			copy(wi.streamID[:], header.StreamID())
 			copy(wi.reqID[:], header.RequestID())
 			wi.ctx.Init(conn, logger)
@@ -393,7 +403,7 @@ func (s *Server) connReader(br *bufio.Reader, inStreamMsg *sync.Map, pipeline bo
 					}
 					continue
 				}
-				go func(wi *serverWorkItem) {
+				go func(wi *serverUnaryWorkItem) {
 					s.handleRequest(wi, pendingResponses, nil, stopCh)
 					atomic.AddUint32(&s.concurrencyCount, ^uint32(0))
 				}(wi)
@@ -404,14 +414,14 @@ func (s *Server) connReader(br *bufio.Reader, inStreamMsg *sync.Map, pipeline bo
 	}
 }
 
-func (s *Server) handleRequest(wi *serverWorkItem, pendingResponses chan<- *serverWorkItem, stream *StreamServer, stopCh <-chan struct{}) {
+func (s *Server) handleRequest(wi *serverUnaryWorkItem, pendingResponses chan<- WorkItem, stream *StreamServer, stopCh <-chan struct{}) {
 	reqID := wi.reqID
 	//wi.event.Printf("start handling request id %v", binary.BigEndian.Uint32(reqID[:]))
 
 	ctxNew := s.Handler(wi.ctx, stream)
 	//wi.event.Printf("finish handling request id %v", binary.BigEndian.Uint32(reqID[:]))
 	if stream != nil {
-		close(stream.streamOutMessage)
+		stream.Close()
 
 	}
 
@@ -438,6 +448,31 @@ func (s *Server) handleRequest(wi *serverWorkItem, pendingResponses chan<- *serv
 
 }
 
+func (s *Server) handleStartStream(wi *serverStreamStartWorkItem, pendingResponses chan<- WorkItem, stream *StreamServer, stopCh <-chan struct{}) {
+	reqID := wi.reqID
+	//wi.event.Printf("start handling request id %v", binary.BigEndian.Uint32(reqID[:]))
+
+	ctxNew := s.Handler(wi.ctx, stream)
+	//wi.event.Printf("finish handling request id %v", binary.BigEndian.Uint32(reqID[:]))
+	if stream != nil {
+		stream.Close()
+
+	}
+
+	if isZeroReqID(reqID) {
+		// Do not send response for SendNowait request.
+		if ctxNew == wi.ctx {
+			s.releaseServerStreamStartWorkItem(wi)
+		}
+		return
+	}
+
+	//
+
+	pushPendingResponse(pendingResponses, wi, stopCh)
+
+}
+
 func (s *Server) RegisterService(e Exposable) {
 	registerService(e)
 }
@@ -446,7 +481,7 @@ func (s *Server) HandleFunc(path string, handlerFunc HandlerFunc, info *Operatio
 	registerHandleFunc(path, handlerFunc, info)
 }
 
-func pushPendingResponse(pendingResponses chan<- *serverWorkItem, wi *serverWorkItem, stopCh <-chan struct{}) bool {
+func pushPendingResponse(pendingResponses chan<- WorkItem, wi WorkItem, stopCh <-chan struct{}) bool {
 	select {
 	case pendingResponses <- wi:
 	default:
@@ -459,9 +494,8 @@ func pushPendingResponse(pendingResponses chan<- *serverWorkItem, wi *serverWork
 	return true
 }
 
-func (s *Server) connWriter(bw *bufio.Writer, conn net.Conn, pendingResponses <-chan *serverWorkItem, streamOut <-chan *serverStreamOut, stopCh <-chan struct{}) error {
-	var wi *serverWorkItem
-	var so *serverStreamOut
+func (s *Server) connWriter(bw *bufio.Writer, conn net.Conn, pendingResponses <-chan WorkItem, stopCh <-chan struct{}) error {
+	var wi WorkItem
 
 	var (
 		flushTimer    = getFlushTimer()
@@ -483,11 +517,9 @@ func (s *Server) connWriter(bw *bufio.Writer, conn net.Conn, pendingResponses <-
 	for {
 		select {
 		case wi = <-pendingResponses:
-		case so = <-streamOut:
 		default:
 			select {
 			case wi = <-pendingResponses:
-			case so = <-streamOut:
 			case <-stopCh:
 				return nil
 			case <-flushCh:
@@ -514,29 +546,52 @@ func (s *Server) connWriter(bw *bufio.Writer, conn net.Conn, pendingResponses <-
 			}
 		}
 
-		if so != nil {
-			header.SetControl(streamMessage)
-			header.SetID(so.streamID)
+		switch wi := wi.(type) {
+		case *serverStreamStartWorkItem:
+			header.SetControl(streamStart)
+			header.SetID(binary.BigEndian.Uint32(wi.reqID[:]))
 
 			if _, err := bw.Write(header); err != nil {
-				so.error <- err
-				so = nil
+				return fmt.Errorf("cannot write header: %s", err)
+			}
+
+			if err := wi.ctx.WriteResponse(bw); err != nil {
+				return fmt.Errorf("cannot write response: %s", err)
+			}
+
+			s.releaseServerStreamStartWorkItem(wi)
+
+			// re-arm flush channel
+			if flushCh == nil && len(pendingResponses) == 0 {
+				if maxBatchDelay > 0 {
+					resetFlushTimer(flushTimer, maxBatchDelay)
+					flushCh = flushTimer.C
+				} else {
+					flushCh = flushAlwaysCh
+				}
+			}
+
+		case *serverStreamMessageWorkItem:
+			header.SetControl(streamMessage)
+			header.SetID(wi.streamID)
+
+			if _, err := bw.Write(header); err != nil {
+				wi.error <- err
+				wi = nil
 				return fmt.Errorf("cannot write resp header: %s", err)
 			}
 
-			if err := so.response.WriteResponse(bw); err != nil {
-				so.error <- err
-				so = nil
+			if err := wi.response.WriteResponse(bw); err != nil {
+				wi.error <- err
+				wi = nil
 				return fmt.Errorf("cannot write stream response: %s", err)
 			}
-			so.error <- nil
-			ReleaseResponse(so.response)
-			releaseServerStreamOut(so)
+			wi.error <- nil
+			ReleaseResponse(wi.response)
+			releaseServerStreamWi(wi)
 
 			flushCh = flushAlwaysCh
-			so = nil
-		} else {
-
+		case *serverUnaryWorkItem:
 			header.SetControl(unary)
 			header.SetID(binary.BigEndian.Uint32(wi.reqID[:]))
 
@@ -559,30 +614,60 @@ func (s *Server) connWriter(bw *bufio.Writer, conn net.Conn, pendingResponses <-
 					flushCh = flushAlwaysCh
 				}
 			}
+
 		}
 
 	}
 }
 
-type serverWorkItem struct {
+type serverUnaryWorkItem struct {
 	ctx         *exposedCtx
 	startStream bool
 	reqID       [4]byte
 	streamID    [4]byte
 }
 
-func (s *Server) acquireWorkItem() *serverWorkItem {
-	v := s.workItemPool.Get()
+func (*serverUnaryWorkItem) Type() packetControl {
+	return unary
+}
+
+func (s *Server) acquireWorkItem() *serverUnaryWorkItem {
+	v := s.unaryWorkItemPool.Get()
 	if v == nil {
-		return &serverWorkItem{
+		return &serverUnaryWorkItem{
 			ctx: s.NewHandlerCtx(),
 		}
 	}
-	return v.(*serverWorkItem)
+	return v.(*serverUnaryWorkItem)
 }
 
-func (s *Server) releaseWorkItem(wi *serverWorkItem) {
-	s.workItemPool.Put(wi)
+func (s *Server) releaseWorkItem(wi *serverUnaryWorkItem) {
+	s.unaryWorkItemPool.Put(wi)
+}
+
+type serverStreamStartWorkItem struct {
+	ctx         *exposedCtx
+	startStream bool
+	reqID       [4]byte
+	streamID    [4]byte
+}
+
+func (*serverStreamStartWorkItem) Type() packetControl {
+	return streamStart
+}
+
+func (s *Server) acquireServerStreamStartWorkItem() *serverStreamStartWorkItem {
+	v := s.streamStartWorkItemPool.Get()
+	if v == nil {
+		return &serverStreamStartWorkItem{
+			ctx: s.NewHandlerCtx(),
+		}
+	}
+	return v.(*serverStreamStartWorkItem)
+}
+
+func (s *Server) releaseServerStreamStartWorkItem(wi *serverStreamStartWorkItem) {
+	s.streamStartWorkItemPool.Put(wi)
 }
 
 var defaultLogger = zerolog.New(os.Stdout).With().Caller().Logger()

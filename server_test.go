@@ -8,7 +8,6 @@ import (
 	"io/ioutil"
 	"math/rand"
 	"net"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -65,7 +64,7 @@ func newTestHandlerCtx() *exposedCtx {
 }
 
 func testServerBrokenClient(t *testing.T, clientConnFunc func(net.Conn) error) {
-	l := zerolog.New(os.Stdout)
+	l := zerolog.New(ioutil.Discard)
 
 	s := NewServer(
 		ServerCompression(CompressNone),
